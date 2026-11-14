@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import os
 import re
 from datetime import date, datetime
@@ -13,6 +14,8 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from google import genai
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
 
 load_dotenv(override=True)
 
@@ -25,7 +28,6 @@ roles = {"farmer", "user", "admin"}
 requestStatus = {"pending", "partiallyFulfilled", "fullyFulfilled", "canceled"}
 allocStatus = {"reserved", "partiallyDelivered", "delivered", "canceled"}
 movementTypes = {"added", "reserved", "canceled", "delivered", "loss", "correction_added", "correction_removed"}
-allowedUnits = ["g", "kg", "ton", "box", "piece"]
 
 
 # -----------------------------------------------------------------------------
@@ -123,8 +125,26 @@ def changeData(query, values=()):
             connection.close()
 
 
+passwordHasher = PasswordHasher()  # Argon2id includes a new random salt each time.
+
+
 def hashPassword(password):
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    # New accounts get a salted password hash, never a plain SHA-256 hash.
+    return passwordHasher.hash(password)
+
+
+def verifyPassword(password, storedHash):
+    # Old SHA-256 accounts can log in once, then we upgrade their hash.
+    storedHash = str(storedHash)
+    if re.fullmatch(r"[0-9a-fA-F]{64}", storedHash):
+        oldHash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(oldHash, storedHash.lower()), True
+    if not storedHash.startswith("$argon2id$"):
+        return False, False
+    try:
+        return passwordHasher.verify(storedHash, password), False
+    except (VerifyMismatchError, VerificationError, InvalidHashError, ValueError):
+        return False, False
 
 
 def isValidEmail(email):
@@ -167,11 +187,98 @@ def denyAccess(currentUser, details):
 
 
 def getActiveUnits():
-    return allowedUnits.copy()
+    # Get the units the admin has allowed instead of keeping a Python list.
+    units = selectData(
+        "SELECT unitName FROM Units WHERE isActive = 1 ORDER BY unitName"
+    )
+    if units.empty:
+        return []
+    return units["unitName"].astype(str).tolist()
 
 
 def isValidUnit(unit):
-    return str(unit).strip().lower() in allowedUnits
+    return str(unit).strip().lower() in getActiveUnits()
+
+
+def addReferenceUnit(unitName, adminID):
+    # Only add a unit if it is not already in the database.
+    unitName = str(unitName).strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,19}", unitName):
+        return False, "Use 1-20 letters, numbers or underscores, starting with a letter."
+    connection = None
+    cursor = None
+    try:
+        connection = getConnection()
+        cursor = connection.cursor()
+        cursor.execute("SELECT role FROM Users WHERE userID = %s", (adminID,))
+        adminRow = cursor.fetchone()
+        if adminRow is None or str(adminRow[0]).lower() != "admin":
+            connection.rollback()
+            return False, "Only administrators can manage units."
+        cursor.execute(
+            "SELECT unitName FROM Units WHERE unitName = %s", (unitName,)
+        )
+        if cursor.fetchone() is not None:
+            connection.rollback()
+            return False, "That unit already exists. You can reactivate it below."
+        cursor.execute(
+            "INSERT INTO Units (unitName, isActive) VALUES (%s, 1)", (unitName,)
+        )
+        connection.commit()
+        logActivity(adminID, "unit_added", f"Added unit {unitName}")
+        return True, "Unit added successfully."
+    except Exception as error:
+        if connection:
+            connection.rollback()
+        print("Unit creation error:", repr(error))
+        return False, friendlyDatabaseError(error)
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
+def setReferenceUnitActive(unitName, isActive, adminID):
+    # Keep old unit values in transactions even when a unit is turned off.
+    connection = None
+    cursor = None
+    try:
+        connection = getConnection()
+        cursor = connection.cursor()
+        cursor.execute("SELECT role FROM Users WHERE userID = %s", (adminID,))
+        adminRow = cursor.fetchone()
+        if adminRow is None or str(adminRow[0]).lower() != "admin":
+            connection.rollback()
+            return False, "Only administrators can manage units."
+        cursor.execute(
+            "SELECT isActive FROM Units WHERE unitName = %s FOR UPDATE", (unitName,)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            connection.rollback()
+            return False, "Unit not found. Please refresh."
+        if bool(row[0]) == bool(isActive):
+            connection.rollback()
+            return False, "This unit already has that status."
+        cursor.execute(
+            "UPDATE Units SET isActive = %s WHERE unitName = %s",
+            (1 if isActive else 0, unitName)
+        )
+        connection.commit()
+        logActivity(adminID, "unit_status_changed",
+                    f"Set unit {unitName} to {'active' if isActive else 'inactive'}")
+        return True, "Unit status updated successfully."
+    except Exception as error:
+        if connection:
+            connection.rollback()
+        print("Unit status error:", repr(error))
+        return False, friendlyDatabaseError(error)
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
 
 
 def signUpUser(
@@ -353,10 +460,18 @@ def signInUser(email, password):
         if user is None:
             return None, "The email or password is incorrect."
 
-        enteredPasswordHash = hashPassword(password)
-
-        if user[5] != enteredPasswordHash:
+        validPassword, oldHash = verifyPassword(password, user[5])
+        if not validPassword:
             return None, "The email or password is incorrect."
+
+        if oldHash or passwordHasher.check_needs_rehash(str(user[5])):
+            # Upgrade old hashes only after the correct password was entered.
+            cursor.execute(
+                "UPDATE Users SET passwordHash = %s "
+                "WHERE userID = %s AND passwordHash = %s",
+                (hashPassword(password), user[0], user[5])
+            )
+            connection.commit()
 
         signedInUser = {
             "userID": user[0],
@@ -512,6 +627,158 @@ def updateRequestStatus(
             reason
         )
     )
+def getLockedLotStock(cursor, lotID):
+    # Count the latest stock using the same transaction, not another connection.
+    cursor.execute(
+        """SELECT movementType, quantity
+           FROM StockMovements
+           WHERE lotID = %s""", (lotID,)
+    )
+    onHand = Decimal("0")
+    reserved = Decimal("0")
+    for kind, amount in cursor.fetchall():
+        amount = Decimal(str(amount))
+        if kind in ("added", "correction_added"):
+            onHand += amount
+        elif kind in ("loss", "correction_removed"):
+            onHand -= amount
+        elif kind == "reserved":
+            reserved += amount
+        elif kind == "delivered":
+            onHand -= amount
+            reserved -= amount
+        elif kind == "canceled":
+            reserved -= amount
+    if onHand < 0 or reserved < 0 or onHand < reserved:
+        raise ValueError("Inconsistent stock movements for this lot")
+    return onHand, reserved, onHand - reserved
+
+
+def getLockedRequestProgress(cursor, requestID):
+    # Calculate the request using the records in our current transaction.
+    cursor.execute(
+        """SELECT quantityRequested, reqStatus
+           FROM MarketRequests WHERE requestID = %s""", (requestID,)
+    )
+    request = cursor.fetchone()
+    if request is None:
+        raise ValueError("Request was not found")
+    requested = Decimal(str(request[0]))
+    status = str(request[1])
+    cursor.execute(
+        """SELECT COALESCE(SUM(receivedQuantity), 0)
+           FROM DeliveryReceipts WHERE requestID = %s""", (requestID,)
+    )
+    received = Decimal(str(cursor.fetchone()[0]))
+    cursor.execute(
+        """SELECT sm.movementType, sm.quantity
+           FROM Allocations a, StockMovements sm
+           WHERE a.allocationID = sm.allocationID AND a.requestID = %s""",
+        (requestID,)
+    )
+    reserved = Decimal("0")
+    for kind, amount in cursor.fetchall():
+        amount = Decimal(str(amount))
+        if kind == "reserved":
+            reserved += amount
+        elif kind in ("delivered", "canceled"):
+            reserved -= amount
+    if reserved < 0 or received < 0 or received + reserved > requested:
+        raise ValueError("Inconsistent request quantities")
+    return requested, received, reserved, status
+
+
+def getReservedForAllocation(cursor, allocationID):
+    cursor.execute(
+        """SELECT movementType, quantity FROM StockMovements
+           WHERE allocationID = %s""", (allocationID,)
+    )
+    reserved = Decimal("0")
+    delivered = Decimal("0")
+    for kind, amount in cursor.fetchall():
+        amount = Decimal(str(amount))
+        if kind == "reserved":
+            reserved += amount
+        elif kind == "canceled":
+            reserved -= amount
+        elif kind == "delivered":
+            reserved -= amount
+            delivered += amount
+    if reserved < 0:
+        raise ValueError("Invalid allocation movements")
+    return reserved, delivered
+
+
+def requestStatusFromProgress(requested, received, reserved, oldStatus):
+    if oldStatus == "canceled":
+        return "canceled"
+    if received >= requested:
+        return "fullyFulfilled"
+    if received > 0 or reserved > 0:
+        return "partiallyFulfilled"
+    return "pending"
+
+
+def recordStockAdjustment(lotID, movementType, quantity, unit, reason, userID):
+    connection = None
+    cursor = None
+    try:
+        quantity = Decimal(str(quantity))
+        if not quantity.is_finite() or quantity <= 0 or movementType not in {
+            "loss", "correction_added", "correction_removed"
+        }:
+            return False, "Choose a valid movement and positive quantity."
+        if movementType.startswith("correction") and not str(reason or "").strip():
+            return False, "Enter the reason for the approved correction."
+        connection = getConnection()
+        cursor = connection.cursor()
+        # Read the latest committed movements after waiting for a lock.
+        cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        # Lock the lot before checking whether stock can be removed.
+        cursor.execute(
+            """SELECT unit, status FROM HarvestLots
+               WHERE lotID = %s FOR UPDATE""", (lotID,)
+        )
+        lot = cursor.fetchone()
+        if lot is None:
+            connection.rollback()
+            return False, "This harvest lot is unavailable."
+        cursor.execute(
+            """SELECT cc.farmID FROM HarvestLots hl, CropCycle cc, OwnedBy o
+               WHERE hl.cycleID = cc.cycleID AND cc.farmID = o.farmID
+               AND hl.lotID = %s AND o.userID = %s""", (lotID, userID),
+        )
+        if cursor.fetchone() is None:
+            connection.rollback()
+            return False, "This lot does not belong to your farm."
+        if str(lot[0]) != str(unit):
+            connection.rollback()
+            return False, "The stock unit has changed. Please refresh."
+        _, _, available = getLockedLotStock(cursor, lotID)
+        if movementType != "correction_added" and quantity > available:
+            connection.rollback()
+            return False, f"Only {available:,.2f} {unit} is currently available."
+        cursor.execute(
+            """INSERT INTO StockMovements
+               (lotID, allocationID, movementType, quantity, unit,
+                dateOccurred, reason, performedBy)
+               VALUES (%s, NULL, %s, %s, %s, %s, %s, %s)""",
+            (lotID, movementType, quantity, unit, datetime.now(), reason, userID),
+        )
+        connection.commit()
+        return True, "Stock movement recorded successfully."
+    except Exception as error:
+        if connection:
+            connection.rollback()
+        print("Stock adjustment error:", repr(error))
+        return False, "The stock movement could not be saved. Please try again."
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
 def calculateLotAvailability(lotID):
     connection = None
     cursor = None
@@ -670,34 +937,8 @@ def calculateRequestProgress(requestID):
 
 
 def refreshLotStatus(lotID):
-    stockOnHand, reservedQuantity, availableQuantity = (
-        calculateLotAvailability(lotID)
-    )
-
-    if availableQuantity is None:
-        return
-
-    newStatus = 1 if float(availableQuantity) > 0 else 0
-    connection = None
-    cursor = None
-
-    try:
-        connection = getConnection()
-        cursor = connection.cursor()
-        cursor.execute(
-            "UPDATE HarvestLots SET status = %s WHERE lotID = %s",
-            (newStatus, lotID)
-        )
-        connection.commit()
-    except Exception as error:
-        if connection:
-            connection.rollback()
-        print("Harvest-lot status refresh error:", error)
-    finally:
-        if cursor:
-            cursor.close()
-        if connection:
-            connection.close()
+    # Stock availability is calculated; do not change the farmer's lot status.
+    return
 
 def showDashboard(current_user):
     st.header("Availability dashboard")
@@ -1990,6 +2231,41 @@ def showFarmManagement(current_user):
                 st.rerun()
 
 
+def setHarvestLotActive(lotID, isActive, userID):
+    connection = None
+    cursor = None
+    try:
+        connection = getConnection()
+        cursor = connection.cursor()
+        cursor.execute("SELECT cycleID FROM HarvestLots WHERE lotID = %s FOR UPDATE", (lotID,))
+        lot = cursor.fetchone()
+        if lot is None:
+            connection.rollback()
+            return False, "This harvest lot was not found."
+        cursor.execute(
+            """SELECT 1 FROM CropCycle cc, OwnedBy o
+               WHERE cc.farmID = o.farmID AND cc.cycleID = %s AND o.userID = %s""",
+            (lot[0], userID),
+        )
+        if cursor.fetchone() is None:
+            connection.rollback()
+            return False, "This lot does not belong to your farm."
+        cursor.execute("UPDATE HarvestLots SET status = %s WHERE lotID = %s",
+                       (1 if isActive else 0, lotID))
+        connection.commit()
+        return True, "Lot status updated."
+    except Exception as error:
+        if connection:
+            connection.rollback()
+        print("Lot status error:", repr(error))
+        return False, "The lot status could not be updated."
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
 def showHarvestManagement(current_user):
     st.header("Harvest and stock management")
     if "imageUploadMessage" in st.session_state:
@@ -2230,17 +2506,16 @@ def showHarvestManagement(current_user):
                 lot["sellByDate"]
             ).date()
 
-        calculatedStatus = 1 if float(availableQuantity) > 0 else 0
-        inventory.at[index, "status"] = calculatedStatus
-
-        if int(lot["status"]) != calculatedStatus:
-            refreshLotStatus(lotID)
+        # Keep the saved lot status separate from how much stock is left.
 
         if sellByDateValue is not None and sellByDateValue < date.today():
             inventory.at[
                 index,
                 "saleStatus"
             ] = "past sell-by date"
+
+        elif int(lot["status"]) == 0:
+            inventory.at[index, "saleStatus"] = "inactive"
 
         elif float(availableQuantity) <= 0:
             inventory.at[
@@ -2290,6 +2565,23 @@ def showHarvestManagement(current_user):
                 "Status"
             ]
             st.dataframe(activeDisplay, use_container_width=True, hide_index=True)
+
+    # The farmer chooses if a lot is active; stock level does not change this flag.
+    with st.expander("Activate or deactivate a harvest lot"):
+        statusOptions = {
+            f"Lot {int(lot['lotID'])} - {lot['cropName']} ({'Active' if int(lot['status']) else 'Inactive'})": int(lot['lotID'])
+            for _, lot in inventory.iterrows()
+        }
+        selectedStatusLabel = st.selectbox("Harvest lot", list(statusOptions))
+        newStatus = st.radio("Set lot status", ["Active", "Inactive"], horizontal=True)
+        if st.button("Save lot status"):
+            changed, msg = setHarvestLotActive(statusOptions[selectedStatusLabel],
+                                               newStatus == "Active", userID)
+            if changed:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.warning(msg)
 
     if activeInventory.empty:
         return
@@ -2604,25 +2896,14 @@ def showHarvestManagement(current_user):
                 )
 
             else:
-                recorded = changeData(
-                    """INSERT INTO StockMovements
-                    (lotID, allocationID, movementType,
-                    quantity, unit, dateOccurred, reason, performedBy)
-                    VALUES (%s, NULL, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        selectedLotID,
-                        storedMovementType,
-                        movementQuantity,
-                        lotUnit,
-                        datetime.now(),
-                        savedReason,
-                        userID
-                    )
+                recorded, adjustmentMessage = recordStockAdjustment(
+                    selectedLotID, storedMovementType, movementQuantity,
+                    lotUnit, savedReason, userID
                 )
-
+                if not recorded:
+                    st.warning(adjustmentMessage)
 
                 if recorded:
-                    refreshLotStatus(selectedLotID)
                     logActivity(
                         userID,
                         "stock_movement_recorded",
@@ -3298,459 +3579,204 @@ def showFarmerAllocations(current_user):
             else:
                 st.warning(message)
 
-def createAllocation(
-    requestID,
-    lotID,
-    quantity,
-    userID
-):
+def createAllocation(requestID, lotID, quantity, userID):
     connection = None
     cursor = None
-
     try:
-        if quantity <= 0:
-            return False, (
-                "The allocation quantity must be greater than zero."
-            )
-
+        quantity = Decimal(str(quantity))
+        if not quantity.is_finite() or quantity <= 0:
+            return False, "Allocation quantity must be greater than zero."
         connection = getConnection()
         cursor = connection.cursor()
+        # Read the latest committed movements after waiting for a lock.
+        cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
 
+        # Lock the request first, then the lot, so two farmers cannot oversell.
         cursor.execute(
             """SELECT cropID, quantityRequested, unit, reqStatus
-               FROM MarketRequests
-               WHERE requestID = %s""",
-            (requestID,))
-
+               FROM MarketRequests WHERE requestID = %s FOR UPDATE""",
+            (requestID,),
+        )
         request = cursor.fetchone()
-
         if request is None:
-            return False, (
-                "The market request could not be found."
-            )
-
-        requestCropID = int(request[0])
-        quantityRequested = float(request[1])
-        requestUnit = str(request[2])
-        requestStatus = str(request[3])
-
-        if not isValidUnit(requestUnit):
-            return False, "The request contains an unsupported unit."
-
-        if requestStatus not in {
-            "pending",
-            "partiallyFulfilled"
-        }:
-            return False, (
-                "This request is no longer open."
-            )
+            connection.rollback()
+            return False, "The market request could not be found."
+        cropID, requested, requestUnit, requestStatus = request
+        if str(requestStatus) not in ("pending", "partiallyFulfilled"):
+            connection.rollback()
+            return False, "This request is no longer open."
 
         cursor.execute(
-            """SELECT cc.cropID, hl.unit, hl.sellByDate
-               FROM HarvestLots hl, CropCycle cc, OwnedBy o
-               WHERE hl.cycleID = cc.cycleID AND cc.farmID = o.farmID AND hl.lotID = %s AND o.userID = %s AND hl.status = 1""",
-            (lotID, userID))
-
+            """SELECT cycleID, unit, harvestDate, sellByDate, status
+               FROM HarvestLots WHERE lotID = %s FOR UPDATE""", (lotID,),
+        )
         lot = cursor.fetchone()
-
         if lot is None:
-            logActivity(
-                userID,
-                "access_denied",
-                f"Attempted to allocate harvest lot {lotID}"
-            )
-            return False, (
-                "This harvested lot does not belong "
-                "to your farm."
-            )
-
-        lotCropID = int(lot[0])
-        lotUnit = str(lot[1])
-        sellByDate = None if lot[2] is None else pd.to_datetime(lot[2]).date()
-
-        if not isValidUnit(lotUnit):
-            return False, "The harvest lot contains an unsupported unit."
-
-        if lotCropID != requestCropID:
-            return False, (
-                "The crop in this lot does not match "
-                "the requested crop."
-            )
-
-        if lotUnit != requestUnit:
-            return False, (
-                "The lot unit does not match the request unit."
-            )
-
-        if sellByDate is not None and sellByDate < date.today():
-            return False, (
-                "This harvested lot has passed its sell-by date."
-            )
-
-        progress = calculateRequestProgress(requestID)
-
-        if progress is None:
-            return False, (
-                "The request quantities could not be calculated."
-            )
-
-        remainingRequest = float(
-            progress["remainingQuantity"]
+            connection.rollback()
+            return False, "The harvested lot was not found."
+        cycleID, lotUnit, harvestDate, sellByDate, lotStatus = lot
+        cursor.execute(
+            """SELECT cc.cropID FROM CropCycle cc, OwnedBy o
+               WHERE cc.farmID = o.farmID AND cc.cycleID = %s
+               AND o.userID = %s""", (cycleID, userID),
         )
-
-        if remainingRequest <= 0:
-            return False, (
-                "The full requested quantity has already "
-                "been allocated."
-            )
-
+        owned = cursor.fetchone()
+        if owned is None:
+            connection.rollback()
+            return False, "This harvested lot does not belong to your farm."
+        if int(owned[0]) != int(cropID) or str(lotUnit) != str(requestUnit):
+            connection.rollback()
+            return False, "The lot crop or unit does not match this request."
+        if int(lotStatus) != 1:
+            connection.rollback()
+            return False, "This harvest lot is inactive."
+        if pd.to_datetime(harvestDate).date() > date.today() or (
+            sellByDate is not None and pd.to_datetime(sellByDate).date() < date.today()
+        ):
+            connection.rollback()
+            return False, "This harvest lot is not within its sale dates."
+        requested, received, reserved, _ = getLockedRequestProgress(cursor, requestID)
+        remainingRequest = requested - received - reserved
         if quantity > remainingRequest:
-            return False, (
-                f"Only {remainingRequest:,.2f} "
-                f"{requestUnit} remains in this request."
-            )
-
-        (
-            stockOnHand,
-            reservedQuantity,
-            availableQuantity
-        ) = calculateLotAvailability(lotID)
-
-        if availableQuantity is None:
-            return False, (
-                "The available quantity could not be calculated."
-            )
-
-        availableQuantity = float(
-            availableQuantity
-        )
-
-        if quantity > availableQuantity:
-            return False, (
-                f"Only {availableQuantity:,.2f} "
-                f"{lotUnit} is currently available."
-            )
+            connection.rollback()
+            return False, f"Only {remainingRequest:,.2f} {requestUnit} remains in this request."
+        _, _, available = getLockedLotStock(cursor, lotID)
+        if quantity > available:
+            connection.rollback()
+            return False, f"Only {available:,.2f} {lotUnit} is currently available."
 
         allocationDate = datetime.now()
-
         cursor.execute(
-            """INSERT INTO Allocations (requestID, lotID, allocatedBy, quantityAllocated, allocationDate, allocStatus)
+            """INSERT INTO Allocations
+               (requestID, lotID, allocatedBy, quantityAllocated, allocationDate, allocStatus)
                VALUES (%s, %s, %s, %s, %s, %s)""",
-            (
-                requestID,
-                lotID,
-                userID,
-                quantity,
-                allocationDate,
-                "reserved"
-            ))
-
+            (requestID, lotID, userID, quantity, allocationDate, "reserved"),
+        )
         allocationID = cursor.lastrowid
-
         cursor.execute(
             """INSERT INTO StockMovements
-            (lotID, allocationID, movementType,
-                quantity, unit, dateOccurred, reason, performedBy)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (
-                lotID,
-                allocationID,
-                "reserved",
-                quantity,
-                lotUnit,
-                allocationDate,
-                f"Reserved for market request {requestID}",
-                userID
-            )
-)
-
-        updateRequestStatus(
-            cursor=cursor,
-            requestID=requestID,
-            newStatus="partiallyFulfilled",
-            changedBy=userID,
-            reason="Produce reserved by farmer"
+               (lotID, allocationID, movementType, quantity, unit,
+                dateOccurred, reason, performedBy)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (lotID, allocationID, "reserved", quantity, lotUnit,
+             allocationDate, f"Reserved for market request {requestID}", userID),
         )
-
+        updateRequestStatus(cursor, requestID, "partiallyFulfilled", userID,
+                            "Produce reserved by farmer")
         connection.commit()
-        refreshLotStatus(lotID)
-        logActivity(
-            userID,
-            "allocation_created",
-            f"Created allocation {allocationID} for request {requestID}"
-        )
-
-        return (
-            True,
-            f"{quantity:,.2f} {lotUnit} was "
-            f"reserved successfully."
-        )
-
+        logActivity(userID, "allocation_created",
+                    f"Created allocation {allocationID} for request {requestID}")
+        return True, f"{quantity:,.2f} {lotUnit} was reserved successfully."
     except Exception as error:
         if connection:
             connection.rollback()
-
-        print("Allocation error:", error)
-
-        return False, (
-            "The allocation could not be created."
-        )
-
+        print("Allocation error:", repr(error))
+        return False, "The allocation could not be created. Please try again."
     finally:
         if cursor:
             cursor.close()
-
         if connection:
             connection.close()
 
-def cancelReservedQuantity(
-    allocationID,
-    cancellationQuantity,
-    reason,
-    userID
-):
+def cancelReservedQuantity(allocationID, cancellationQuantity, reason, userID):
     connection = None
     cursor = None
-
     try:
         cancellationQuantity = Decimal(str(cancellationQuantity))
-
-        if cancellationQuantity <= 0:
+        if not cancellationQuantity.is_finite() or cancellationQuantity <= 0:
             return False, "Cancellation quantity must be greater than zero."
-
         connection = getConnection()
         cursor = connection.cursor()
-
-        # Lock the allocation while processing the cancellation.
+        # Read the latest committed movements after waiting for a lock.
+        cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         cursor.execute(
-            """
-            SELECT a.requestID, a.lotID, a.quantityAllocated,
-                   hl.unit, a.allocStatus
-            FROM Allocations a, HarvestLots hl, CropCycle cc, OwnedBy o
-            WHERE a.lotID = hl.lotID
-              AND hl.cycleID = cc.cycleID
-              AND cc.farmID = o.farmID
-              AND a.allocationID = %s
-              AND o.userID = %s
-            FOR UPDATE
-            """,
-            (allocationID, userID)
+            """SELECT requestID, lotID FROM Allocations
+               WHERE allocationID = %s""", (allocationID,),
         )
+        ids = cursor.fetchone()
+        if ids is None:
+            connection.rollback()
+            return False, "The allocation could not be found."
+        requestID, lotID = int(ids[0]), int(ids[1])
 
+        # Always lock request, lot, then allocation in the same order.
+        cursor.execute(
+            """SELECT quantityRequested, reqStatus FROM MarketRequests
+               WHERE requestID = %s FOR UPDATE""", (requestID,),
+        )
+        requestRow = cursor.fetchone()
+        cursor.execute(
+            """SELECT unit FROM HarvestLots WHERE lotID = %s FOR UPDATE""",
+            (lotID,),
+        )
+        lot = cursor.fetchone()
+        cursor.execute(
+            """SELECT requestID, lotID, quantityAllocated, allocStatus
+               FROM Allocations WHERE allocationID = %s FOR UPDATE""",
+            (allocationID,),
+        )
         allocation = cursor.fetchone()
-
-        if allocation is None:
+        if requestRow is None or lot is None or allocation is None:
+            connection.rollback()
+            return False, "The allocation is no longer available."
+        if int(allocation[0]) != requestID or int(allocation[1]) != lotID:
+            connection.rollback()
+            return False, "The allocation changed. Please refresh."
+        cursor.execute(
+            """SELECT 1 FROM HarvestLots hl, CropCycle cc, OwnedBy o
+               WHERE hl.cycleID = cc.cycleID AND cc.farmID = o.farmID
+               AND hl.lotID = %s AND o.userID = %s""", (lotID, userID),
+        )
+        if cursor.fetchone() is None:
             connection.rollback()
             return False, "This allocation does not belong to your farm."
-
-        requestID = int(allocation[0])
-        lotID = int(allocation[1])
-        unit = str(allocation[3])
-
-        # Calculate the current outstanding reservation.
-        cursor.execute(
-            """
-            SELECT movementType, quantity
-            FROM StockMovements
-            WHERE allocationID = %s
-            """,
-            (allocationID,)
-        )
-
-        movements = cursor.fetchall()
-
-        reservedRemaining = Decimal("0")
-        deliveredQuantity = Decimal("0")
-
-        for movementType, movementQuantity in movements:
-            movementType = str(movementType).strip().lower()
-            movementQuantity = Decimal(str(movementQuantity))
-
-            if movementType == "reserved":
-                reservedRemaining += movementQuantity
-
-            elif movementType == "delivered":
-                reservedRemaining -= movementQuantity
-                deliveredQuantity += movementQuantity
-
-            elif movementType == "canceled":
-                reservedRemaining -= movementQuantity
-
-        if reservedRemaining <= 0:
+        if str(requestRow[1]) == "canceled":
             connection.rollback()
-            return False, "This allocation has no reserved quantity left."
-
-        if cancellationQuantity > reservedRemaining:
+            return False, "This market request is canceled."
+        remaining, delivered = getReservedForAllocation(cursor, allocationID)
+        if remaining <= 0 or cancellationQuantity > remaining:
             connection.rollback()
-            return False, (
-                f"Only {reservedRemaining:,.2f} {unit} "
-                "can be canceled."
-            )
+            return False, f"Only {remaining:,.2f} {lot[0]} can be canceled."
 
-        savedReason = reason.strip() if reason and reason.strip() else (
-            "Reserved quantity released"
-        )
-
-        cancellationDate = datetime.now()
-
-        # Record the release as a stock movement.
+        savedReason = (reason or "").strip() or "Reserved quantity released"
         cursor.execute(
-            """
-            INSERT INTO StockMovements
-                (lotID, allocationID, movementType,
-                 quantity, unit, dateOccurred, reason, performedBy)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                lotID,
-                allocationID,
-                "canceled",
-                cancellationQuantity,
-                unit,
-                cancellationDate,
-                savedReason,
-                userID
-            )
+            """INSERT INTO StockMovements
+               (lotID, allocationID, movementType, quantity, unit,
+                dateOccurred, reason, performedBy)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (lotID, allocationID, "canceled", cancellationQuantity, lot[0],
+             datetime.now(), savedReason, userID),
         )
-
-        # The historical quantityAllocated is NOT changed.
-        remainingAfterCancellation = (
-            reservedRemaining - cancellationQuantity
+        remainingAfter = remaining - cancellationQuantity
+        newAllocationStatus = (
+            "delivered" if remainingAfter == 0 and delivered > 0 else
+            "canceled" if remainingAfter == 0 else
+            "partiallyDelivered" if delivered > 0 else "reserved"
         )
-
-        if remainingAfterCancellation == 0:
-            if deliveredQuantity > 0:
-                newAllocationStatus = "delivered"
-            else:
-                newAllocationStatus = "canceled"
-
-        elif deliveredQuantity > 0:
-            newAllocationStatus = "partiallyDelivered"
-
-        else:
-            newAllocationStatus = "reserved"
-
         cursor.execute(
-            """
-            UPDATE Allocations
-            SET allocStatus = %s
-            WHERE allocationID = %s
-            """,
-            (newAllocationStatus, allocationID)
+            """UPDATE Allocations SET allocStatus = %s
+               WHERE allocationID = %s""", (newAllocationStatus, allocationID),
         )
-
-        # Get the request quantity and lock the request.
-        cursor.execute(
-            """
-            SELECT quantityRequested, reqStatus
-            FROM MarketRequests
-            WHERE requestID = %s
-            FOR UPDATE
-            """,
-            (requestID,)
+        requested, received, reserved, oldStatus = getLockedRequestProgress(
+            cursor, requestID,
         )
-
-        requestRow = cursor.fetchone()
-
-        if requestRow is None:
-            raise ValueError("Related market request does not exist.")
-
-        requestedQuantity = Decimal(str(requestRow[0]))
-        existingRequestStatus = str(requestRow[1])
-
-        # Find the total quantity received for this request.
-        cursor.execute(
-            """
-            SELECT COALESCE(SUM(receivedQuantity), 0)
-            FROM DeliveryReceipts
-            WHERE requestID = %s
-            """,
-            (requestID,)
-        )
-
-        receivedQuantity = Decimal(str(cursor.fetchone()[0]))
-
-        # Calculate reservations across all allocations
-        # belonging to this market request.
-        cursor.execute(
-            """
-            SELECT
-                COALESCE(SUM(
-                    CASE
-                        WHEN sm.movementType = 'reserved'
-                            THEN sm.quantity
-                        WHEN sm.movementType IN ('delivered', 'canceled')
-                            THEN -sm.quantity
-                        ELSE 0
-                    END
-                ), 0)
-            FROM Allocations a, StockMovements sm
-            WHERE a.allocationID = sm.allocationID
-              AND a.requestID = %s
-            """,
-            (requestID,)
-        )
-
-        outstandingReserved = Decimal(str(cursor.fetchone()[0]))
-
-        if outstandingReserved < 0:
-            raise ValueError("Invalid negative reserved quantity.")
-
-        # Preserve a canceled market request, if applicable.
-        if existingRequestStatus == "canceled":
-            newRequestStatus = "canceled"
-
-        elif receivedQuantity >= requestedQuantity:
-            newRequestStatus = "fullyFulfilled"
-
-        elif receivedQuantity > 0 or outstandingReserved > 0:
-            newRequestStatus = "partiallyFulfilled"
-
-        else:
-            newRequestStatus = "pending"
-
-        # Uses your existing helper, and records status history.
-        updateRequestStatus(
-            cursor=cursor,
-            requestID=requestID,
-            newStatus=newRequestStatus,
-            changedBy=userID,
-            reason=savedReason
-        )
-
+        updateRequestStatus(cursor, requestID,
+                            requestStatusFromProgress(requested, received, reserved, oldStatus),
+                            userID, savedReason)
         connection.commit()
-
-        # Activity log is recorded after successful cancellation.
-        logActivity(
-            userID,
-            "reservation_released",
-            f"Released {cancellationQuantity} {unit} "
-            f"from allocation {allocationID}"
-        )
-
-        return True, (
-            f"{cancellationQuantity:,.2f} {unit} "
-            "was released successfully."
-        )
-
+        logActivity(userID, "reservation_released",
+                    f"Released {cancellationQuantity} {lot[0]} from allocation {allocationID}")
+        return True, f"{cancellationQuantity:,.2f} {lot[0]} was released successfully."
     except Exception as error:
         if connection:
             connection.rollback()
-
-        print("Cancellation error:", error)
-
-        return False, (
-            "The reserved quantity could not be canceled."
-        )
-
+        print("Cancellation error:", repr(error))
+        return False, "The reserved quantity could not be canceled."
     finally:
         if cursor:
             cursor.close()
-
         if connection:
             connection.close()
-
-
 
 # -----------------------------------------------------------------------------
 # User pages
@@ -4119,7 +4145,8 @@ def updateMarketRequest(
         cursor.execute(
             """SELECT reqStatus
                FROM MarketRequests
-               WHERE requestID = %s AND userID = %s""",
+               WHERE requestID = %s AND userID = %s
+               FOR UPDATE""",
             (requestID, userID)
         )
 
@@ -4215,6 +4242,21 @@ def updateMarketRequest(
             connection.close()
 
 
+def getAllocationReservedForDisplay(allocationID):
+    movements = selectData(
+        """SELECT movementType, quantity FROM StockMovements
+           WHERE allocationID = %s""", (allocationID,), show_error=False
+    )
+    balance = Decimal("0")
+    for _, row in movements.iterrows():
+        amount = Decimal(str(row["quantity"]))
+        if row["movementType"] == "reserved":
+            balance += amount
+        elif row["movementType"] in ("canceled", "delivered"):
+            balance -= amount
+    return max(Decimal("0"), balance)
+
+
 def showDeliveries(current_user):
     st.header("Confirm deliveries")
 
@@ -4244,6 +4286,13 @@ def showDeliveries(current_user):
         (userID,)
     )
 
+    if not allocations.empty:
+        # Show the buyer only the amount still reserved after cancellations.
+        allocations["expectedNow"] = allocations["allocationID"].apply(
+            lambda aid: float(getAllocationReservedForDisplay(int(aid)))
+        )
+        allocations = allocations[allocations["expectedNow"] > 0].copy()
+
     if allocations.empty:
         st.info("There are no outstanding allocated deliveries to confirm.")
         receipts = selectData(
@@ -4271,7 +4320,7 @@ def showDeliveries(current_user):
             "allocationID",
             "requestID",
             "cropName",
-            "quantityAllocated",
+            "expectedNow",
             "unit",
         ]
     )
@@ -4281,9 +4330,18 @@ def showDeliveries(current_user):
             "Allocation received",
             list(allocationOptions.keys())
         )
+        selectedID = allocationOptions[allocationLabel]
+        expectedNow = float(allocations.loc[
+            allocations["allocationID"] == selectedID, "expectedNow"
+        ].iloc[0])
+        selectedUnit = str(allocations.loc[
+            allocations["allocationID"] == selectedID, "unit"
+        ].iloc[0])
+        st.caption(f"Expected delivery: {expectedNow:,.2f} {selectedUnit}")
         receivedQuantity = st.number_input(
             "Quantity actually received",
             min_value=0.0,
+            max_value=expectedNow,
             value=0.0
         )
         deliveryDate = st.date_input(
@@ -4325,190 +4383,138 @@ def showDeliveries(current_user):
 def confirmDelivery(allocationID, receivedQuantity, deliveryDate, userID):
     connection = None
     cursor = None
-
     try:
+        receivedQuantity = Decimal(str(receivedQuantity))
+        if not receivedQuantity.is_finite() or receivedQuantity < 0:
+            return False, "Received quantity cannot be negative or invalid."
+        if hasattr(deliveryDate, "date"):
+            deliveryDate = deliveryDate.date()
+        if deliveryDate > date.today():
+            return False, "The delivery date cannot be in the future."
         connection = getConnection()
         cursor = connection.cursor()
-
+        # Read the latest committed movements after waiting for a lock.
+        cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         cursor.execute(
-            """SELECT a.requestID, a.lotID, a.quantityAllocated,
-                      mr.userID, mr.quantityRequested, mr.unit,
-                      a.allocStatus
-               FROM Allocations a, MarketRequests mr
-               WHERE a.requestID = mr.requestID
-               AND a.allocationID = %s""",
-            (allocationID,)
+            """SELECT requestID, lotID FROM Allocations
+               WHERE allocationID = %s""", (allocationID,),
+        )
+        ids = cursor.fetchone()
+        if ids is None:
+            connection.rollback()
+            return False, "The allocation could not be found."
+        requestID, lotID = int(ids[0]), int(ids[1])
+
+        # Lock the same records so a second delivery cannot sneak in.
+        cursor.execute(
+            """SELECT userID, quantityRequested, unit, reqStatus
+               FROM MarketRequests WHERE requestID = %s FOR UPDATE""",
+            (requestID,),
+        )
+        request = cursor.fetchone()
+        cursor.execute(
+            """SELECT unit FROM HarvestLots WHERE lotID = %s FOR UPDATE""",
+            (lotID,),
+        )
+        lot = cursor.fetchone()
+        cursor.execute(
+            """SELECT requestID, lotID, quantityAllocated, allocationDate, allocStatus
+               FROM Allocations WHERE allocationID = %s FOR UPDATE""",
+            (allocationID,),
         )
         allocation = cursor.fetchone()
-
-        if allocation is None:
-            return False, "The allocation could not be found."
-
-        if int(allocation[3]) != userID:
-            logActivity(
-                userID,
-                "access_denied",
-                f"Attempted to confirm allocation {allocationID}"
-            )
+        if request is None or lot is None or allocation is None:
+            connection.rollback()
+            return False, "This delivery is no longer available."
+        if int(request[0]) != int(userID):
+            connection.rollback()
             return False, "You cannot confirm another user's delivery."
-
-        requestID = int(allocation[0])
-        lotID = int(allocation[1])
-        expectedQuantity = float(allocation[2])
-        requestedQuantity = float(allocation[4])
-        unit = str(allocation[5])
-        allocationStatus = str(allocation[6])
-
-        if not isValidUnit(unit):
-            return False, "The allocation contains an unsupported unit."
-
-        if allocationStatus not in {"reserved", "partiallyDelivered"}:
-            return False, "This allocation is no longer awaiting confirmation."
-
+        if int(allocation[0]) != requestID or int(allocation[1]) != lotID:
+            connection.rollback()
+            return False, "The allocation changed. Please refresh."
+        if str(request[3]) == "canceled" or str(allocation[4]) not in (
+            "reserved", "partiallyDelivered"
+        ):
+            connection.rollback()
+            return False, "This allocation is not awaiting confirmation."
+        if str(request[2]) != str(lot[0]):
+            connection.rollback()
+            return False, "The request and harvest units do not match."
+        if deliveryDate < pd.to_datetime(allocation[3]).date():
+            connection.rollback()
+            return False, "Delivery cannot be dated before the allocation."
         cursor.execute(
-            "SELECT receiptID FROM DeliveryReceipts WHERE allocationID = %s",
-            (allocationID,)
+            """SELECT receiptID FROM DeliveryReceipts
+               WHERE allocationID = %s""", (allocationID,),
         )
-
         if cursor.fetchone() is not None:
-            return False, "A receipt has already been recorded for this allocation."
+            connection.rollback()
+            return False, "A delivery receipt already exists for this allocation."
 
-        receivedQuantity = float(receivedQuantity)
-
-        if receivedQuantity < 0:
-            return False, "The received quantity cannot be negative."
-
-        discrepancyQuantity = expectedQuantity - receivedQuantity
-        movementDate = datetime.combine(deliveryDate, datetime.min.time())
-
+        # Expected means what is still reserved after earlier cancellations.
+        expectedQuantity, alreadyDelivered = getReservedForAllocation(cursor, allocationID)
+        if expectedQuantity <= 0:
+            connection.rollback()
+            return False, "There is no reserved quantity left to deliver."
         if receivedQuantity > expectedQuantity:
-            extraQuantity = receivedQuantity - expectedQuantity
-            _, _, availableQuantity = calculateLotAvailability(lotID)
-
-            if availableQuantity is None or extraQuantity > float(availableQuantity):
-                return False, "The extra received quantity exceeds available stock."
-
-            cursor.execute(
-                """INSERT INTO StockMovements
-                   (lotID, allocationID, movementType, quantity,
-                    unit, dateOccurred, reason, performedBy)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                (
-                    lotID,
-                    allocationID,
-                    "reserved",
-                    extraQuantity,
-                    unit,
-                    movementDate,
-                    "Extra quantity confirmed during delivery",
-                    userID
-                )
-            )
-
+            connection.rollback()
+            return False, f"Received quantity cannot exceed {expectedQuantity:,.2f} {lot[0]}."
+        requested, receivedSoFar, otherReserved, oldStatus = getLockedRequestProgress(
+            cursor, requestID,
+        )
+        if receivedSoFar + receivedQuantity > requested:
+            connection.rollback()
+            return False, "The received quantity exceeds the market request."
+        discrepancy = expectedQuantity - receivedQuantity
+        movementDate = datetime.combine(deliveryDate, datetime.min.time())
         cursor.execute(
             """INSERT INTO DeliveryReceipts
-               (requestID, allocationID, expectedQuantity,
-                receivedQuantity, discrepancyQuantity, unit,
-                deliveryDate, confirmedBy)
+               (requestID, allocationID, expectedQuantity, receivedQuantity,
+                discrepancyQuantity, unit, deliveryDate, confirmedBy)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (
-                requestID,
-                allocationID,
-                expectedQuantity,
-                receivedQuantity,
-                discrepancyQuantity,
-                unit,
-                movementDate,
-                userID
-            )
+            (requestID, allocationID, expectedQuantity, receivedQuantity,
+             discrepancy, lot[0], movementDate, userID),
         )
-
         if receivedQuantity > 0:
             cursor.execute(
                 """INSERT INTO StockMovements
-                   (lotID, allocationID, movementType, quantity,
-                    unit, dateOccurred, reason, performedBy)
+                   (lotID, allocationID, movementType, quantity, unit,
+                    dateOccurred, reason, performedBy)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                (
-                    lotID,
-                    allocationID,
-                    "delivered",
-                    receivedQuantity,
-                    unit,
-                    movementDate,
-                    "Delivery confirmed by market buyer",
-                    userID
-                )
+                (lotID, allocationID, "delivered", receivedQuantity, lot[0],
+                 movementDate, "Delivery confirmed by buyer", userID),
             )
-
-        if discrepancyQuantity > 0:
+        if discrepancy > 0:
             cursor.execute(
                 """INSERT INTO StockMovements
-                   (lotID, allocationID, movementType, quantity,
-                    unit, dateOccurred, reason, performedBy)
+                   (lotID, allocationID, movementType, quantity, unit,
+                    dateOccurred, reason, performedBy)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                (
-                    lotID,
-                    allocationID,
-                    "canceled",
-                    discrepancyQuantity,
-                    unit,
-                    movementDate,
-                    "Undelivered quantity released",
-                    userID
-                )
+                (lotID, allocationID, "canceled", discrepancy, lot[0],
+                 movementDate, "Undelivered stock released", userID),
             )
-
         cursor.execute(
-            "UPDATE Allocations SET allocStatus = %s WHERE allocationID = %s",
-            ("delivered", allocationID)
+            """UPDATE Allocations SET allocStatus = 'delivered'
+               WHERE allocationID = %s""", (allocationID,),
         )
-
-        cursor.execute(
-            """SELECT dr.receivedQuantity
-               FROM DeliveryReceipts dr
-               WHERE dr.requestID = %s""",
-            (requestID,)
-        )
-        totalReceived = sum(float(row[0]) for row in cursor.fetchall())
-        newRequestStatus = (
-            "fullyFulfilled"
-            if totalReceived >= requestedQuantity
-            else "partiallyFulfilled"
-        )
-        updateRequestStatus(
-            cursor,
-            requestID,
-            newRequestStatus,
-            userID,
-            "Delivery receipt confirmed"
-        )
-
+        requested, received, reserved, oldStatus = getLockedRequestProgress(cursor, requestID)
+        updateRequestStatus(cursor, requestID,
+                            requestStatusFromProgress(requested, received, reserved, oldStatus),
+                            userID, "Delivery receipt confirmed")
         connection.commit()
-        refreshLotStatus(lotID)
-        logActivity(
-            userID,
-            "delivery_confirmed",
-            f"Confirmed allocation {allocationID}; discrepancy {discrepancyQuantity} {unit}"
-        )
-
-        message = (
-            f"Delivery confirmed. Discrepancy: "
-            f"{discrepancyQuantity:,.2f} {unit}."
-        )
-        return True, message
-
+        logActivity(userID, "delivery_confirmed",
+                    f"Confirmed allocation {allocationID}; discrepancy {discrepancy} {lot[0]}")
+        return True, f"Delivery confirmed. Discrepancy: {discrepancy:,.2f} {lot[0]}."
     except Exception as error:
         if connection:
             connection.rollback()
-        print("Delivery confirmation error:", error)
-        return False, "The delivery could not be confirmed. Please check the entered values."
+        print("Delivery confirmation error:", repr(error))
+        return False, "The delivery could not be confirmed. Please try again."
     finally:
         if cursor:
             cursor.close()
         if connection:
             connection.close()
-
 
 # -----------------------------------------------------------------------------
 # Administrator pages
@@ -4666,8 +4672,8 @@ def showAdminReferenceData(current_user):
         denyAccess(current_user, "Attempted to open administrator reference data")
         return
 
-    user_tab, crop_tab, market_tab = st.tabs(
-        ["Users", "Crops", "Markets"]
+    user_tab, crop_tab, market_tab, unit_tab = st.tabs(
+        ["Users", "Crops", "Markets", "Units"]
     )
 
     with user_tab:
@@ -4793,6 +4799,61 @@ def showAdminReferenceData(current_user):
                     if changeData(query, (market_name.strip(), market_location.strip())):
                         st.success("Market added successfully.")
                         st.rerun()
+
+    with unit_tab:
+        st.subheader("Manage units")
+        st.caption("Inactive units stay in older records, but cannot be selected for new entries.")
+        unitData = selectData(
+            "SELECT unitName, isActive FROM Units ORDER BY unitName"
+        )
+        if not unitData.empty:
+            displayUnits = unitData.copy()
+            displayUnits["Status"] = displayUnits["isActive"].map(
+                {1: "Active", 0: "Inactive", True: "Active", False: "Inactive"}
+            )
+            st.dataframe(
+                displayUnits[["unitName", "Status"]].rename(
+                    columns={"unitName": "Unit"}
+                ),
+                use_container_width=True, hide_index=True
+            )
+
+        with st.form("admin_add_unit"):
+            newUnit = st.text_input("New unit", placeholder="e.g. crate")
+            addUnitSubmitted = st.form_submit_button("Add unit")
+        if addUnitSubmitted:
+            success, message = addReferenceUnit(newUnit, current_user["userID"])
+            if success:
+                st.session_state["adminUnitMessage"] = message
+                st.rerun()
+            else:
+                st.warning(message)
+
+        if "adminUnitMessage" in st.session_state:
+            st.success(st.session_state.pop("adminUnitMessage"))
+
+        if not unitData.empty:
+            with st.form("admin_change_unit_status"):
+                chosenUnit = st.selectbox(
+                    "Existing unit", unitData["unitName"].astype(str).tolist()
+                )
+                currentlyActive = bool(
+                    unitData.loc[unitData["unitName"] == chosenUnit, "isActive"].iloc[0]
+                )
+                desiredStatus = st.selectbox(
+                    "Change to", ["Inactive", "Active"],
+                    index=0 if currentlyActive else 1
+                )
+                statusSubmitted = st.form_submit_button("Save unit status")
+            if statusSubmitted:
+                success, message = setReferenceUnitActive(
+                    chosenUnit, desiredStatus == "Active", current_user["userID"]
+                )
+                if success:
+                    st.session_state["adminUnitMessage"] = message
+                    st.rerun()
+                else:
+                    st.warning(message)
 
 def showAdminOperations(current_user):
     st.header("Operational records")

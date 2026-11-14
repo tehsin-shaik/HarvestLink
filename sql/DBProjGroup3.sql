@@ -2,6 +2,12 @@ CREATE SCHEMA IF NOT EXISTS DBProjGroup3;
 CREATE DATABASE IF NOT EXISTS DBProjGroup3;
 USE DBProjGroup3;
 
+-- Admins can manage which units are available in the app.
+CREATE TABLE IF NOT EXISTS Units (
+    unitName VARCHAR(20) PRIMARY KEY,
+    isActive BOOLEAN NOT NULL DEFAULT 1,
+    CHECK (isActive IN (0, 1))
+);
 
 CREATE TABLE Users(
     userID INT AUTO_INCREMENT PRIMARY KEY,
@@ -174,3 +180,4 @@ CREATE TABLE UserActivityLog(
     details VARCHAR(500),
     FOREIGN KEY (userID) REFERENCES Users(userID)
 );
+

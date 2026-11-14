@@ -5,3 +5,4 @@ SQLAlchemy
 PyMySQL
 Pillow
 google-genai
+argon2-cffi

@@ -1,5 +1,11 @@
 USE DBProjGroup3;
 
+INSERT IGNORE INTO Units (unitName, isActive) VALUES
+('g', 1),
+('kg', 1),
+('ton', 1),
+('box', 1),
+('piece', 1);
 
 INSERT INTO Users (userID, fname, lname, role, email, passwordHash) VALUES
 (1, 'Raghad', 'Elajab', 'farmer', 'raghadelajab@gmail.com', '894c6ccbfea998515381ab1771a8ac92cd2a12a4f306eb6469874eb7d1cf8b8f'),
@@ -187,3 +193,4 @@ INSERT INTO UserActivityLog (userID, actionType, actionDate, details) VALUES
 (6, 'login', '2026-11-14 08:00:00', 'Administrator signed in'),
 (5, 'delivery_confirmed', '2026-11-14 10:00:00', 'Confirmed allocation 6; discrepancy 5000 g'),
 (6, 'logout', '2026-11-14 09:00:00', 'Administrator signed out after 01:00:00');
+

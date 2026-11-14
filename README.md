@@ -1,391 +1,279 @@
-
 <div align="center">
 
 # 🌱 HarvestLink
 
 ### Connecting Local Farms to Local Markets
 
-**A Smart Farm-to-Market Food Availability & Inventory Management System**
-
-<br>
+**A Farm-to-Market Food Availability & Inventory Management System**
 
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![SQL](https://img.shields.io/badge/SQL-Database-4479A1?style=for-the-badge&logo=postgresql&logoColor=white)
-![LangChain](https://img.shields.io/badge/LangChain-AI-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
+![MySQL](https://img.shields.io/badge/MySQL-4479A1?style=for-the-badge&logo=mysql&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-In%20Development-orange?style=for-the-badge)
 
-<br>
-
----
-
-*Empowering local agriculture through smarter inventory management, transparent supply chains, and AI-assisted data access.*
+*From local farms to local markets.*
 
 </div>
 
-## 📖 Overview
+## Overview
 
-**HarvestLink** is a database-driven application designed to connect local farmers with markets across the United Arab Emirates.
-
-The platform provides a centralized system for managing agricultural production, tracking harvested inventory, discovering available produce, and coordinating market requests.
-
-By integrating a **relational SQL database**, a **Python-based graphical interface**, and a **LangChain-powered AI assistant**, HarvestLink aims to make local food availability more accessible, organized, and transparent.
+HarvestLink is a Python application built with Streamlit and MySQL for managing local agricultural supply, harvested inventory, market requests, and deliveries. It includes separate farmer, market buyer, and administrator workflows, harvest-lot images, and a Gemini-powered database assistant.
 
 > [!NOTE]
-> HarvestLink is an educational prototype developed for COSC444 at Khalifa University. It uses synthetic data and does not represent official UAE agricultural inventories or government systems.
+> This is an educational prototype for COSC444 at Khalifa University. Use fictional demonstration data. It does not connect to government systems or represent official UAE food inventories.
 
----
+> [!IMPORTANT]
+> The current assistant uses the Google Gen AI SDK directly. **LangChain integration is still pending**, although it is required by the project proposal. Features listed below describe implementation, not a completed end-to-end test certification.
 
-## ✨ Key Features
+## Implemented Features
 
-<table>
-<tr>
-<td width="50%" valign="top">
+| Area | Current functionality |
+|:---|:---|
+| Farm management | Register and edit farms; associate farmers through `OwnedBy`; create and update crop cycles with expected quantities and harvest dates |
+| Harvests and inventory | Record harvest lots; calculate stock on hand, reserved stock, and available stock from movements; record losses and corrections |
+| Market operations | Search produce; create and update requests; reserve produce through farmer allocations; cancel reservations; confirm deliveries and discrepancies |
+| History | Completed crop-cycle history, inactive harvest-lot history, and past allocations |
+| Images | JPG/PNG upload controls; images linked to lots; persistent local files; duplicate pixel detection within a lot; safe image display |
+| Accounts and audit | Registration, hashed-password login, explicit logout, session state, ownership checks, sensitive-operation logging, and administrator activity views |
+| Administration | Manage users and roles; add crops and markets; inspect operational records and responsible users |
+| Assistant | Natural-language questions through Gemini, generated SELECT-query checks, supporting SQL/results, and answer summaries |
+| Error handling | Friendly database messages, form validation, rollback, and transaction locking in key inventory operations |
 
-### 🚜 Farm Management
-- Register and manage farms
-- Track crop cultivation cycles
-- Record expected harvests
-- Manage harvested produce
-- Upload product images
+### User Roles
 
-</td>
-<td width="50%" valign="top">
+| Database role | Application user | Main actions |
+|:---|:---|:---|
+| `farmer` | Farmer | Manage assigned farms, crop cycles, lots, images, stock movements, and allocations |
+| `user` | Market buyer | Search produce, manage personal requests, and confirm received deliveries |
+| `admin` | Administrator | Manage reference data and user roles; review operational records and security activity |
 
-### 📦 Inventory Tracking
-- Monitor available stock
-- Track reserved quantities
-- Record inventory movements
-- Manage produce losses
-- Prevent inventory overselling
+### Inventory and History
 
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
+- Expected harvests are forecasts and remain separate from harvested inventory.
+- Available quantity is stock on hand minus reserved quantity.
+- Quantities carry explicit units: `g`, `kg`, `ton`, `box`, or `piece`. Units are currently configured in Python; automatic conversions are not implemented.
+- Reservations, releases, deliveries, losses, and corrections are recorded as dated stock movements.
+- Key allocation, cancellation, delivery, and adjustment operations use transactions and row locks to coordinate stock changes.
+- Harvest-lot activation is managed explicitly. Zero availability does not automatically change the stored active/inactive status.
+- Request-status history and stock movements retain the responsible user and relevant details.
 
-### 🛒 Market Operations
-- Search locally available produce
-- Filter by crop and location
-- Submit supply requests
-- Track request fulfillment
-- Confirm deliveries
-
-</td>
-<td width="50%" valign="top">
-
-### 🤖 AI Database Assistant
-- Ask natural-language questions
-- Retrieve database insights
-- Explore agricultural availability
-- View supporting SQL records
-- Safely handle unsupported queries
-
-</td>
-</tr>
-</table>
-
----
-
-## 🏗️ System Architecture
+## Architecture
 
 ```mermaid
 flowchart TD
-    A["👤 Application Users"] --> B["🖥️ Python GUI"]
-
-    B --> C["🚜 Farmer Portal"]
-    B --> D["🛒 Market Portal"]
-    B --> E["⚙️ Administrator Portal"]
-
-    C --> F["🐍 Python Backend"]
-    D --> F
-    E --> F
-
-    F --> G[("🗄️ Relational SQL Database")]
-
-    B --> H["🤖 LangChain Assistant"]
-    H --> I["🔒 Validated Read-Only Queries"]
-    I --> G
-
-    G --> J["Farms & Crops"]
-    G --> K["Harvests & Inventory"]
-    G --> L["Requests & Deliveries"]
+    U[Farmer / Market buyer / Administrator] --> UI[Streamlit interface]
+    UI --> P[Python application logic]
+    P --> DB[(MySQL: DBProjGroup3)]
+    UI --> AI[Gemini database assistant]
+    AI --> Q[Generated SELECT-query checks]
+    Q --> DB
+    P --> F[Local image files]
+    DB --> R[Harvest-lot image references]
 ```
 
-The SQL database acts as the **single source of truth**, while the application layer enforces inventory constraints, user permissions, and safe database transactions.
+The current interface, database helpers, business logic, and assistant are in `code/applicationn1.py`. A future refactor can separate these modules without changing the application framework.
 
----
-
-## 👥 User Roles
-
-| Role | Responsibilities |
-|:---|:---|
-| 🚜 **Farmer** | Manage assigned farms, harvest lots, stock movements, and supply allocations |
-| 🛒 **Market Buyer** | Discover produce, create market requests, and confirm deliveries |
-| ⚙️ **Administrator** | Manage users, crop references, locations, and system records |
-
-Each role operates within defined access permissions to protect data integrity.
-
----
-
-## 🗄️ Database Design
-
-HarvestLink uses a relational database designed around agricultural production, inventory management, and market transactions.
-
-### Core Entities
-
-| Entity | Description |
-|:---|:---|
-| `Users` | Application users and their roles |
-| `Farms` | Registered agricultural farms |
-| `Crops` | Supported agricultural products |
-| `CropCycles` | Planting and harvesting periods |
-| `HarvestLots` | Individual harvested batches |
-| `HarvestLotImages` | Images associated with harvest lots |
-| `StockMovements` | Inventory changes and adjustments |
-| `Markets` | Registered market locations |
-| `MarketRequests` | Produce requests from buyers |
-| `Allocations` | Harvest quantities reserved for requests |
-| `DeliveryReceipts` | Confirmed deliveries and discrepancies |
-
-### Inventory Rules
-
-The system is designed to ensure:
-
-- Harvest forecasts remain separate from actual stock.
-- Reserved produce cannot be allocated twice.
-- Allocations never exceed available inventory.
-- Partial requests and deliveries are supported.
-- Stock changes maintain an auditable history.
-- Quantity units are explicitly recorded.
-- Failed transactions do not partially update inventory.
-
----
-
-## 🤖 AI-Powered Database Assistant
-
-HarvestLink integrates **LangChain** to support natural-language interaction with agricultural data.
-
-Instead of manually navigating database tables, users can ask questions such as:
-
-> 💬 "Which farms currently have tomatoes available?"
-
-> 💬 "How much cucumber stock is available in Abu Dhabi?"
-
-> 💬 "Which market requests are partially fulfilled?"
-
-> 💬 "What produce is expected to be harvested next week?"
-
-### 🔐 AI Safety
-
-The assistant uses validated, read-only database access.
-
-- No unrestricted AI-generated database modifications
-- No exposure of database credentials
-- No unauthorized access to user records
-- Ambiguous questions are handled explicitly
-- Database records remain the authoritative source
-
----
-
-## 🛠️ Technology Stack
+## Technology Stack
 
 | Component | Technology |
 |:---|:---|
-| Programming Language | Python |
-| Database | Relational SQL |
-| User Interface | Python GUI |
-| AI Integration | LangChain |
-| Data Access | Parameterized SQL Queries |
-| Image Support | JPG / PNG |
-| Version Control | Git & GitHub |
+| Application / GUI | Python and Streamlit |
+| Database | MySQL |
+| Database access | SQLAlchemy and PyMySQL; parameterized queries for application operations |
+| Data tables | pandas |
+| Image processing | Pillow |
+| Configuration | python-dotenv |
+| Current AI integration | Google Gen AI SDK (`google-genai`) |
+| Required future integration | LangChain |
 
-> Specific database engines, GUI frameworks, and AI model providers will be documented as implementation decisions are finalized.
-
----
-
-## 📁 Project Structure
-
-**Proposed repository organization:**
+## Project Structure
 
 ```text
-harvestlink/
-│
-├── app/
-│   ├── gui/
-│   ├── database/
-│   ├── services/
-│   └── ai/
-│
-├── sql/
-│   ├── schema.sql
-│   └── seed.sql
-│
-├── assets/
-│   └── images/
-│
-├── docs/
-│   ├── diagrams/
-│   └── reports/
-│
-├── tests/
-│
-├── main.py
-├── requirements.txt
-├── .gitignore
-└── README.md
+HarvestLink/
+|-- code/
+|   |-- applicationn1.py
+|   |-- requirements.txt
+|   |-- images/
+|   `-- .env                       # Local configuration; ignored by Git
+|-- database design/
+|   |-- projectERDiagram.jpg
+|   `-- projectSchema.png
+|-- sql/
+|   |-- DBProjGroup3.sql            # Schema
+|   `-- populateDB.sql              # Sample records
+|-- Local_Farm_Market_Food_Availability_Project_Proposal.pdf
+|-- .gitignore
+`-- README.md
 ```
 
-The structure may evolve as the project is implemented.
+### Database Tables and Sample Data
 
----
+The schema includes `Users`, `Farms`, `OwnedBy`, `Crops`, `CropCycle`, `HarvestLots`, `HarvestLotImages`, `StockMovements`, `Markets`, `MarketRequests`, `RequestStatusHistory`, `Allocations`, `DeliveryReceipts`, and `UserActivityLog`.
 
-## 🚀 Getting Started
+The population script supplies 4 farms, 4 markets, 5 crops, 16 crop cycles, 12 harvest lots, 35 stock movements, 9 market requests, and 6 delivery receipts. It includes reservations, losses, delivery discrepancies, and image references. These counts meet the proposal's minimum population requirements; records added while using the app will increase live database counts.
+
+## Getting Started
 
 ### Prerequisites
 
-Before running HarvestLink, ensure you have:
+- Python 3.11 or newer recommended.
+- A running MySQL server with a database account permitted to create the initial schema and tables.
+- MySQL Workbench or the MySQL command-line client for importing SQL.
+- A Gemini API key and an available model name if using the assistant. Core application pages do not require an API key.
 
-- Python 3 installed
-- A compatible SQL database
-- Git
-- Required Python dependencies
-- Any necessary AI provider configuration
+### 1. Create the Database
 
-### 1. Clone the Repository
+From the repository root, open MySQL Workbench and execute these scripts **in order**:
 
-```bash
-git clone https://github.com/YOUR_USERNAME/harvestlink.git
-cd harvestlink
+1. `sql/DBProjGroup3.sql`
+2. `sql/populateDB.sql`
+
+Alternatively, start the MySQL client from the repository root:
+
+```powershell
+mysql -u YOUR_MYSQL_USER -p
 ```
 
-### 2. Create a Virtual Environment
+Then run these commands inside the MySQL client:
 
-```bash
+```sql
+SOURCE sql/DBProjGroup3.sql;
+SOURCE sql/populateDB.sql;
+```
+
+Both scripts select the database `DBProjGroup3`. Import them into a fresh project database: table creation and seed inserts are not designed for repeated execution against an already populated database.
+
+### 2. Install Python Dependencies
+
+Open PowerShell in the repository root:
+
+```powershell
+cd code
 python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Activate it:
+These commands use the environment's Python directly, so PowerShell activation is unnecessary. Create the environment on your own computer rather than copying another developer's `.venv`.
 
-**Windows**
-```bash
-.venv\Scripts\activate
-```
-
-**macOS / Linux**
-```bash
-source .venv/bin/activate
-```
-
-### 3. Install Dependencies
+On macOS/Linux, from the repository root:
 
 ```bash
-pip install -r requirements.txt
+cd code
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-### 4. Configure the Database
+### 3. Configure Local Settings
 
-Create and populate the database using the project's SQL scripts.
+Create `code/.env` with your own local values:
 
-Configure database connection settings according to the selected SQL engine.
+```dotenv
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=YOUR_MYSQL_USER
+DB_PASSWORD=YOUR_MYSQL_PASSWORD
+DB_NAME=DBProjGroup3
 
-### 5. Run the Application
+# Optional: needed only for the database assistant.
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY
+GEMINI_MODEL=YOUR_AVAILABLE_GEMINI_MODEL
+```
 
-Once the entry point is implemented:
+Replace placeholders before running. The model name must be available to your API account. Keep `.env` local; it is ignored by Git. Database connection settings are cached, so restart Streamlit after changing them.
+
+### 4. Start Streamlit
+
+From the `code` directory on Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run applicationn1.py
+```
+
+On macOS/Linux:
 
 ```bash
-python main.py
+.venv/bin/python -m streamlit run applicationn1.py
 ```
 
-> [!IMPORTANT]
-> Setup instructions are preliminary. Database configuration, environment variables, and application commands will be updated when the implementation is complete.
+Open the URL printed in the terminal, normally **http://localhost:8501**. Keep MySQL and the terminal running. Press **Ctrl+C** in the terminal to stop Streamlit.
 
----
+### 5. Sign In or Create a Demonstration Account
 
-## 🗺️ Development Roadmap
+Use the Sign up tab to create a fictional farmer or market buyer account. Administrator creation is not available through public sign-up; use the seeded administrator account with the team's demonstration credentials. The seed script stores password hashes rather than plaintext passwords.
 
-- [ ] **Phase 0:** Project planning and team setup
-- [ ] **Phase 1:** ER diagram, relational schema, and SQL population
-- [ ] **Phase 2:** Python GUI and core database operations
-- [ ] **Phase 2:** Image upload and display
-- [ ] **Phase 2:** LangChain assistant integration
-- [ ] **Phase 3:** Implement a selected advanced feature
-- [ ] **Phase 4:** Error handling and data validation
-- [ ] **Phase 5:** Testing, documentation, and final demonstration
+After signing in, the sidebar shows the pages for the account's role. The database connection test is also available in the sidebar.
 
----
+## Image Storage
 
-## 🧪 Testing Strategy
+Uploads are saved as PNG files in `code/images/`, with filenames recorded in `HarvestLotImages`. The image resolver also supports a repository-level `images/` folder and case-insensitive filename matching.
 
-The project will be tested across several categories:
+- Keep image files alongside the SQL records when sharing or submitting the project; the database does not contain the image binaries.
+- Uploads have a 5 MB input limit and a 20-megapixel dimension check.
+- Duplicate detection compares normalized pixel fingerprints within the same harvest lot. Resized or recompressed versions may have different fingerprints.
+- Missing or corrupt images display friendly messages; diagnostic details remain in the terminal.
+- Successful upload messages survive Streamlit reruns.
+- Restart persistence depends on retaining the local image directory. Demonstrate upload, restart, and retrieval before submission.
 
-| Test Category | Focus |
+## Assistant and Security Status
+
+The assistant reads database structure, asks Gemini to generate SQL, checks the query, executes it, and displays a summary with supporting records. Try questions using seeded crops, such as "Which farms have carrots available?" or "Show partially fulfilled market requests."
+
+The current query validator checks for SELECT statements, multiple statements, and blocked keywords. Role restrictions are also described in the model prompt. Database-enforced read-only access and execution-time ownership restrictions still need to be completed and tested; prompts alone are not an authorization boundary.
+
+The selected advanced-feature implementation is **secure login and activity audit**. Administrators can inspect login/logout timestamps, sensitive actions, responsible users, affected-record details, and denied-access demonstrations. Explicit logout records session duration. Automatic session expiry and browser-close logout auditing are not implemented. Passwords currently use SHA-256; a salted password-hashing method remains an improvement.
+
+## Remaining Work
+
+- Integrate LangChain into the GUI assistant and enforce read-only, role-scoped execution.
+- Add a selectable availability-date filter to buyer produce search.
+- Add database-backed administrator management of units.
+- Validate decoded image formats as JPEG/PNG, and show individual reasons for failed multi-image uploads.
+- Complete end-to-end, boundary, repeated-request, rollback, and concurrency tests.
+- Verify the earlier buyer request issue through a live harvest-to-request-to-allocation workflow.
+- Document test cases with expected and actual results, including at least 10 assistant questions with ambiguous and unanswerable examples.
+- Verify diagrams against the latest schema and retain the Draw.io ER source.
+- Document individual team responsibilities.
+- Produce the technical PDF and poster PDF, rehearse the 15-minute presentation, and assemble the final ZIP.
+
+Only one advanced feature is required by the proposal. Analytics, smart demand matching, forecasting, and loss/surplus management are optional alternatives to the implemented login/audit feature.
+
+## Verification Checklist
+
+Record actual results rather than treating this checklist as completed test evidence.
+
+- [ ] Create a harvest and verify available, reserved, and on-hand quantities.
+- [ ] Create a buyer request, allocate stock, cancel a reservation, and verify request/status history.
+- [ ] Confirm a partial delivery and verify stock changes and discrepancy records.
+- [ ] Reject excess allocations, invalid dates/units, duplicate records, and unauthorized actions.
+- [ ] Test simultaneous allocations and repeated delivery confirmations.
+- [ ] Upload JPG/PNG images, reject duplicates/invalid files, and retrieve images after restarting.
+- [ ] Confirm friendly handling of missing/corrupt images and database failures.
+- [ ] Check admin audit entries for login, logout, sensitive actions, and denied access.
+- [ ] Test at least 10 assistant questions against SQL results.
+
+## Troubleshooting
+
+| Symptom | Check |
 |:---|:---|
-| Database Integrity | Keys, constraints, and relationships |
-| Inventory Logic | Harvests, reservations, losses, and deliveries |
-| Access Control | Role-specific permissions |
-| GUI Operations | Form validation and user workflows |
-| AI Assistant | Valid, ambiguous, and unsupported questions |
-| Image Handling | Upload, persistence, and retrieval |
-| Transaction Safety | Rollback and overselling prevention |
+| Cannot connect to the database | Start MySQL, verify `.env`, confirm `DBProjGroup3` exists, and restart Streamlit after configuration changes |
+| Missing tables or no sample records | Import the schema first, then the population script |
+| Image unavailable | Check that the exact filename referenced by `HarvestLotImages.imageName` exists in a supported image folder |
+| No produce in search | Check filters, lot activation, remaining unreserved quantity, harvest date, and sell-by date; seeded dates are fixed |
+| Assistant not configured or unavailable | Set an API key and an account-supported model name in `.env`; check the terminal for diagnostic details |
+| Python environment points to another computer | Recreate `.venv` locally and reinstall requirements |
 
----
+## Academic Information and Team
 
-## 🌍 Motivation
+**Khalifa University of Science and Technology** | Computer Science | **COSC444 - Database Systems** | Fall 2026-2027
 
-The UAE continues to prioritize food security, sustainable agriculture, and resilient local food supply chains.
-
-HarvestLink explores how database technologies can help improve visibility into locally produced food and simplify coordination between agricultural producers and markets.
-
-The project is inspired by the broader goals of the **UAE National Food Security Strategy 2051**.
-
----
-
-## 🎓 Academic Information
-
-| | |
+| Team member | Responsibility |
 |:---|:---|
-| **University** | Khalifa University of Science and Technology |
-| **Department** | Computer Science |
-| **Course** | COSC444 — Database Systems |
-| **Academic Year** | Fall 2026–2027 |
-| **Project Type** | Relational Database Application |
-| **Project Name** | HarvestLink |
+| Tehsin Shaik | To be documented |
+| Raghad Elajab | To be documented |
+| Ayesha Almheiri | To be documented |
 
----
+All team members must contribute to database design and implementation.
 
-## 👨‍💻 Development Team
+## License
 
-Developed as part of the COSC444 Database Systems course.
-
-| Team Member | Role |
-|:---|:---|
-| Tehsin Shaik | To be assigned |
-| Raghad Elajab | To be assigned |
-| Ayesha Almheiri | To be assigned |
-
-All team members contribute to database design and implementation.
-
----
-
-## 📄 License
-
-This project is developed for educational and academic purposes.
-
-A license will be selected if the project is released for public reuse.
-
----
-
-<div align="center">
-
-### 🌱 HarvestLink
-
-**From Local Farms to Local Markets.**
-
-*Built with Python, SQL, and AI.*
-
-<br>
-
-Made for **COSC444 — Database Systems**
-**Khalifa University | 2026–2027**
-
-</div>
+Developed for educational purposes. A license has not yet been selected.
