@@ -7,6 +7,8 @@ from urllib.parse import quote_plus
 from PIL import Image, UnidentifiedImageError
 import pandas as pd
 import streamlit as st
+from decimal import Decimal
+from datetime import datetime
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -2742,7 +2744,7 @@ def finishCropCycle(cycleID, userID):
         cursor.execute(
             """SELECT cc.cycleID
                FROM CropCycle cc, OwnedBy o
-               WHERE cc.farmID = o.farmIDAND cc.cycleID = %s AND o.userID = %s AND cc.status = 1""", (cycleID, userID)
+               WHERE cc.farmID = o.farmID AND cc.cycleID = %s AND o.userID = %s AND cc.status = 1""", (cycleID, userID)
         )
 
         cycle = cursor.fetchone()
@@ -3465,57 +3467,58 @@ def cancelReservedQuantity(
     cursor = None
 
     try:
+        cancellationQuantity = Decimal(str(cancellationQuantity))
+
         if cancellationQuantity <= 0:
-            return False, (
-                "The cancellation quantity must be "
-                "greater than zero."
-            )
+            return False, "Cancellation quantity must be greater than zero."
 
         connection = getConnection()
         cursor = connection.cursor()
 
+        # Lock the allocation while processing the cancellation.
         cursor.execute(
-            """SELECT a.requestID, a.lotID, a.quantityAllocated, hl.unit
-               FROM Allocations a, HarvestLots hl, CropCycle cc, OwnedBy o
-               WHERE a.lotID = hl.lotID AND hl.cycleID = cc.cycleID AND cc.farmID = o.farmID AND a.allocationID = %s AND o.userID = %s""",(allocationID, userID))
+            """
+            SELECT a.requestID, a.lotID, a.quantityAllocated,
+                   hl.unit, a.allocStatus
+            FROM Allocations a
+            JOIN HarvestLots hl ON a.lotID = hl.lotID
+            JOIN CropCycle cc ON hl.cycleID = cc.cycleID
+            JOIN OwnedBy o ON cc.farmID = o.farmID
+            WHERE a.allocationID = %s
+              AND o.userID = %s
+            FOR UPDATE
+            """,
+            (allocationID, userID)
+        )
 
         allocation = cursor.fetchone()
 
         if allocation is None:
-            logActivity(
-                userID,
-                "access_denied",
-                f"Attempted to cancel allocation {allocationID}"
-            )
-            return False, (
-                "This allocation does not belong "
-                "to your farm."
-            )
+            connection.rollback()
+            return False, "This allocation does not belong to your farm."
 
         requestID = int(allocation[0])
         lotID = int(allocation[1])
-        quantityAllocated = float(allocation[2])
         unit = str(allocation[3])
 
+        # Calculate the current outstanding reservation.
         cursor.execute(
-            """SELECT movementType, quantity
-               FROM StockMovements
-               WHERE allocationID = %s
-               ORDER BY dateOccurred""",(allocationID,))
+            """
+            SELECT movementType, quantity
+            FROM StockMovements
+            WHERE allocationID = %s
+            """,
+            (allocationID,)
+        )
 
         movements = cursor.fetchall()
 
-        reservedRemaining = 0.0
-        deliveredQuantity = 0.0
+        reservedRemaining = Decimal("0")
+        deliveredQuantity = Decimal("0")
 
         for movementType, movementQuantity in movements:
-            movementType = str(
-                movementType
-            ).strip().lower()
-
-            movementQuantity = float(
-                movementQuantity
-            )
+            movementType = str(movementType).strip().lower()
+            movementQuantity = Decimal(str(movementQuantity))
 
             if movementType == "reserved":
                 reservedRemaining += movementQuantity
@@ -3528,28 +3531,30 @@ def cancelReservedQuantity(
                 reservedRemaining -= movementQuantity
 
         if reservedRemaining <= 0:
-            return False, (
-                "This allocation has no reserved quantity left."
-            )
+            connection.rollback()
+            return False, "This allocation has no reserved quantity left."
 
         if cancellationQuantity > reservedRemaining:
+            connection.rollback()
             return False, (
-                f"Only {reservedRemaining:,.2f} "
-                f"{unit} can be canceled."
+                f"Only {reservedRemaining:,.2f} {unit} "
+                "can be canceled."
             )
 
-        if reason.strip():
-            savedReason = reason.strip()
-        else:
-            savedReason = None
+        savedReason = reason.strip() if reason and reason.strip() else (
+            "Reserved quantity released"
+        )
 
         cancellationDate = datetime.now()
 
+        # Record the release as a stock movement.
         cursor.execute(
-            """INSERT INTO StockMovements
-            (lotID, allocationID, movementType,
-                quantity, dateOccurred, reason, performedBy)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            """
+            INSERT INTO StockMovements
+                (lotID, allocationID, movementType,
+                 quantity, dateOccurred, reason, performedBy)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
             (
                 lotID,
                 allocationID,
@@ -3560,11 +3565,13 @@ def cancelReservedQuantity(
                 userID
             )
         )
-        newAllocatedQuantity = (
-            quantityAllocated - cancellationQuantity
+
+        # The historical quantityAllocated is NOT changed.
+        remainingAfterCancellation = (
+            reservedRemaining - cancellationQuantity
         )
 
-        if newAllocatedQuantity <= deliveredQuantity:
+        if remainingAfterCancellation == 0:
             if deliveredQuantity > 0:
                 newAllocationStatus = "delivered"
             else:
@@ -3577,59 +3584,107 @@ def cancelReservedQuantity(
             newAllocationStatus = "reserved"
 
         cursor.execute(
-            """UPDATE Allocations
-               SET quantityAllocated = %s, allocStatus = %s
-               WHERE allocationID = %s""",
-            (
-                newAllocatedQuantity,
-                newAllocationStatus,
-                allocationID
-            ))
+            """
+            UPDATE Allocations
+            SET allocStatus = %s
+            WHERE allocationID = %s
+            """,
+            (newAllocationStatus, allocationID)
+        )
 
-        # Check whether this request still has allocations.
+        # Get the request quantity and lock the request.
         cursor.execute(
-            """SELECT quantityAllocated, allocStatus
-               FROM Allocations
-               WHERE requestID = %s""",
-            (requestID,))
+            """
+            SELECT quantityRequested, reqStatus
+            FROM MarketRequests
+            WHERE requestID = %s
+            FOR UPDATE
+            """,
+            (requestID,)
+        )
 
-        requestAllocations = cursor.fetchall()
-        totalAllocated = 0.0
+        requestRow = cursor.fetchone()
 
-        for allocatedQuantity, allocationStatus in requestAllocations:
-            allocationStatus = str(
-                allocationStatus
-            ).strip()
+        if requestRow is None:
+            raise ValueError("Related market request does not exist.")
 
-            if allocationStatus != "canceled":
-                totalAllocated += float(
-                    allocatedQuantity
-                )
+        requestedQuantity = Decimal(str(requestRow[0]))
+        existingRequestStatus = str(requestRow[1])
 
-        if totalAllocated > 0:
+        # Find the total quantity received for this request.
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(receivedQuantity), 0)
+            FROM DeliveryReceipts
+            WHERE requestID = %s
+            """,
+            (requestID,)
+        )
+
+        receivedQuantity = Decimal(str(cursor.fetchone()[0]))
+
+        # Calculate reservations across all allocations
+        # belonging to this market request.
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(SUM(
+                    CASE
+                        WHEN sm.movementType = 'reserved'
+                            THEN sm.quantity
+                        WHEN sm.movementType IN ('delivered', 'canceled')
+                            THEN -sm.quantity
+                        ELSE 0
+                    END
+                ), 0)
+            FROM Allocations a
+            LEFT JOIN StockMovements sm
+                ON a.allocationID = sm.allocationID
+            WHERE a.requestID = %s
+            """,
+            (requestID,)
+        )
+
+        outstandingReserved = Decimal(str(cursor.fetchone()[0]))
+
+        if outstandingReserved < 0:
+            raise ValueError("Invalid negative reserved quantity.")
+
+        # Preserve a canceled market request, if applicable.
+        if existingRequestStatus == "canceled":
+            newRequestStatus = "canceled"
+
+        elif receivedQuantity >= requestedQuantity:
+            newRequestStatus = "fullyFulfilled"
+
+        elif receivedQuantity > 0 or outstandingReserved > 0:
             newRequestStatus = "partiallyFulfilled"
+
         else:
             newRequestStatus = "pending"
 
+        # Uses your existing helper, and records status history.
         updateRequestStatus(
             cursor=cursor,
             requestID=requestID,
             newStatus=newRequestStatus,
             changedBy=userID,
-            reason=savedReason or "Reserved quantity released"
+            reason=savedReason
         )
+
         connection.commit()
-        refreshLotStatus(lotID)
+
+        # Activity log is recorded after successful cancellation.
         logActivity(
             userID,
             "reservation_released",
-            f"Released {cancellationQuantity} {unit} from allocation {allocationID}"
+            f"Released {cancellationQuantity} {unit} "
+            f"from allocation {allocationID}"
         )
 
-        return (
-            True,
-            f"{cancellationQuantity:,.2f} "
-            f"{unit} was released successfully."
+        return True, (
+            f"{cancellationQuantity:,.2f} {unit} "
+            "was released successfully."
         )
 
     except Exception as error:
@@ -3648,6 +3703,7 @@ def cancelReservedQuantity(
 
         if connection:
             connection.close()
+
 
 
 # -----------------------------------------------------------------------------

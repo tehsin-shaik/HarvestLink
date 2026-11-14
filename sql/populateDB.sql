@@ -85,7 +85,6 @@ INSERT INTO MarketRequests (requestID, userID, marketID, cropID, quantityRequest
 (8, 5, 2, 1, 150.00, 'kg', '2026-11-06 13:00:00', 'canceled'),
 (9, 4, 1, 3, 50000.00, 'g', '2026-11-13 10:00:00', 'partiallyFulfilled');
 
-
 INSERT INTO RequestStatusHistory (requestID, oldStatus, newStatus, changedAt, changedBy, reason) VALUES
 (1, NULL, 'pending', '2026-11-05 09:00:00', 4, 'Market request created'),
 (1, 'pending', 'partiallyFulfilled', '2026-11-06 09:00:00', 1, 'Produce allocated by farmer'),
@@ -106,8 +105,6 @@ INSERT INTO RequestStatusHistory (requestID, oldStatus, newStatus, changedAt, ch
 (9, NULL, 'pending', '2026-11-13 10:00:00', 4, 'Market request created'),
 (9, 'pending', 'partiallyFulfilled', '2026-11-13 11:00:00', 2, 'Produce allocated by farmer');
 
-
-
 INSERT INTO Allocations (allocationID, requestID, lotID, allocatedBy, quantityAllocated, allocationDate, allocStatus) VALUES
 (1, 1, 1, 1, 120.00, '2026-11-06 09:00:00', 'delivered'),
 (2, 2, 3, 2, 200.00, '2026-11-08 10:00:00', 'delivered'),
@@ -117,51 +114,48 @@ INSERT INTO Allocations (allocationID, requestID, lotID, allocatedBy, quantityAl
 (6, 6, 9, 3, 80000.00, '2026-11-12 09:00:00', 'delivered'),
 (7, 9, 8, 2, 50000.00, '2026-11-13 11:00:00', 'reserved');
 
+INSERT INTO StockMovements (lotID, allocationID, movementType, quantity, unit, dateOccurred, reason, performedBy) VALUES
+(1, NULL, 'added', 500.00, 'kg','2026-11-05 12:00:00', 'Initial carrot harvest', 1),
+(2, NULL, 'added', 300.00, 'kg','2026-11-06 12:00:00', 'Initial strawberry harvest', 1),
+(3, NULL, 'added', 600.00, 'kg','2026-11-07 12:00:00', 'Initial apple harvest', 2),
+(4, NULL, 'added', 400.00, 'kg','2026-11-08 12:00:00', 'Initial papaya harvest', 2),
+(5, NULL, 'added', 0.45, 'ton','2026-11-09 12:00:00', 'Initial carrot harvest', 2),
+(6, NULL, 'added', 350000.00, 'g','2026-11-10 12:00:00', 'Initial strawberry harvest', 3),
+(7, NULL, 'added', 700.00, 'kg','2026-11-09 12:00:00', 'Initial watermelon harvest', 3),
+(8, NULL, 'added', 300000.00, 'g','2026-11-12 12:00:00', 'Initial apple harvest', 2),
+(9, NULL, 'added', 180000.00, 'g','2026-11-03 12:00:00', 'Initial strawberry harvest', 3),
+(10, NULL, 'added', 0.25, 'ton','2026-10-30 12:00:00', 'Initial carrot harvest', 1),
+(11, NULL, 'added', 250.00, 'kg','2026-11-13 12:00:00', 'Initial Al Ain papaya harvest', 1),
+(12, NULL, 'added', 200.00, 'kg','2026-11-14 12:00:00', 'Initial strawberry harvest', 1);
 
-INSERT INTO StockMovements (lotID, allocationID, movementType, quantity, dateOccurred, reason, performedBy) VALUES
-(1, NULL, 'added', 500.00, '2026-11-05 12:00:00', 'Initial carrot harvest', 1),
-(2, NULL, 'added', 300.00, '2026-11-06 12:00:00', 'Initial strawberry harvest', 1),
-(3, NULL, 'added', 600.00, '2026-11-07 12:00:00', 'Initial apple harvest', 2),
-(4, NULL, 'added', 400.00, '2026-11-08 12:00:00', 'Initial papaya harvest', 2),
-(5, NULL, 'added', 0.45, '2026-11-09 12:00:00', 'Initial carrot harvest', 2),
-(6, NULL, 'added', 350000.00, '2026-11-10 12:00:00', 'Initial strawberry harvest', 3),
-(7, NULL, 'added', 700.00, '2026-11-09 12:00:00', 'Initial watermelon harvest', 3),
-(8, NULL, 'added', 300000.00, '2026-11-12 12:00:00', 'Initial apple harvest', 2),
-(9, NULL, 'added', 180000.00, '2026-11-03 12:00:00', 'Initial strawberry harvest', 3),
-(10, NULL, 'added', 0.25, '2026-10-30 12:00:00', 'Initial carrot harvest', 1),
-(11, NULL, 'added', 250.00, '2026-11-13 12:00:00', 'Initial Al Ain papaya harvest', 1),
-(12, NULL, 'added', 200.00, '2026-11-14 12:00:00', 'Initial strawberry harvest', 1);
+INSERT INTO StockMovements (lotID, allocationID, movementType, quantity, unit, dateOccurred, reason, performedBy) VALUES
+(1, 1, 'reserved', 120.00, 'kg', '2026-11-06 09:00:00', 'Reserved for request 1', 1),
+(3, 2, 'reserved', 200.00, 'kg', '2026-11-08 10:00:00', 'Reserved for request 2', 2),
+(7, 3, 'reserved', 250.00, 'kg', '2026-11-11 09:00:00', 'Reserved for request 4', 3),
+(4, 4, 'reserved', 100.00, 'kg', '2026-11-09 14:00:00', 'Reserved for request 5', 2),
+(7, 5, 'reserved', 300.00, 'kg', '2026-11-10 08:00:00', 'Reserved for request 7', 3),
+(9, 6, 'reserved', 80000.00, 'g', '2026-11-12 09:00:00', 'Reserved for request 6', 3),
+(8, 7, 'reserved', 50000.00, 'g', '2026-11-13 11:00:00', 'Reserved for request 9', 2);
 
-INSERT INTO StockMovements (lotID, allocationID, movementType, quantity, dateOccurred, reason, performedBy) VALUES
-(1, 1, 'reserved', 120.00, '2026-11-06 09:00:00', 'Reserved for request 1', 1),
-(3, 2, 'reserved', 200.00, '2026-11-08 10:00:00', 'Reserved for request 2', 2),
-(7, 3, 'reserved', 250.00, '2026-11-11 09:00:00', 'Reserved for request 4', 3),
-(4, 4, 'reserved', 100.00, '2026-11-09 14:00:00', 'Reserved for request 5', 2),
-(7, 5, 'reserved', 300.00, '2026-11-10 08:00:00', 'Reserved for request 7', 3),
-(9, 6, 'reserved', 80000.00, '2026-11-12 09:00:00', 'Reserved for request 6', 3),
-(8, 7, 'reserved', 50000.00, '2026-11-13 11:00:00', 'Reserved for request 9', 2);
+INSERT INTO StockMovements (lotID, allocationID, movementType, quantity, unit, dateOccurred, reason, performedBy) VALUES
+(1, 1, 'delivered', 92.00, 'kg', '2026-11-07 16:00:00', 'Delivery confirmed by market buyer', 4),
+(1, 1, 'canceled', 28.00, 'kg', '2026-11-07 16:00:00', 'Undelivered quantity released', 4),
+(3, 2, 'delivered', 200.00, 'kg', '2026-11-09 16:00:00', 'Delivery confirmed by market buyer', 4),
+(7, 3, 'delivered', 225.00, 'kg', '2026-11-12 16:00:00', 'Delivery confirmed by market buyer', 4),
+(7, 3, 'canceled', 25.00, 'kg', '2026-11-12 16:00:00', 'Undelivered quantity released', 4),
+(4, 4, 'delivered', 90.00, 'kg', '2026-11-10 17:00:00', 'Delivery confirmed by market buyer', 5),
+(4, 4, 'canceled', 10.00, 'kg', '2026-11-10 17:00:00', 'Undelivered quantity released', 5),
+(7, 5, 'delivered', 250.00, 'kg', '2026-11-13 17:00:00', 'Delivery confirmed by market buyer', 5),
+(9, 6, 'delivered', 75000.00, 'g', '2026-11-14 10:00:00', 'Delivery confirmed by market buyer', 5),
+(7, 5, 'canceled', 50.00, 'kg', '2026-11-13 17:00:00', 'Undelivered quantity released', 5),
+(9, 6, 'canceled', 5000.00, 'g', '2026-11-14 10:00:00', 'Undelivered quantity released', 5);
 
-
-INSERT INTO StockMovements (lotID, allocationID, movementType, quantity, dateOccurred, reason, performedBy) VALUES
-(1, 1, 'delivered', 92.00, '2026-11-07 16:00:00', 'Delivery confirmed by market buyer', 4),
-(1, 1, 'canceled', 28.00, '2026-11-07 16:00:00', 'Undelivered quantity released', 4),
-(3, 2, 'delivered', 200.00, '2026-11-09 16:00:00', 'Delivery confirmed by market buyer', 4),
-(7, 3, 'delivered', 225.00, '2026-11-12 16:00:00', 'Delivery confirmed by market buyer', 4),
-(7, 3, 'canceled', 25.00, '2026-11-12 16:00:00', 'Undelivered quantity released', 4),
-(4, 4, 'delivered', 90.00, '2026-11-10 17:00:00', 'Delivery confirmed by market buyer', 5),
-(4, 4, 'canceled', 10.00, '2026-11-10 17:00:00', 'Undelivered quantity released', 5),
-(7, 5, 'delivered', 250.00, '2026-11-13 17:00:00', 'Delivery confirmed by market buyer', 5),
-(9, 6, 'delivered', 75000.00, '2026-11-14 10:00:00', 'Delivery confirmed by market buyer', 5),
-(7, 5, 'canceled', 50.00, '2026-11-13 17:00:00', 'Undelivered quantity released', 5),
-(9, 6, 'canceled', 5000.00, '2026-11-14 10:00:00', 'Undelivered quantity released', 5);
-
-INSERT INTO StockMovements (lotID, allocationID, movementType, quantity, dateOccurred, reason, performedBy) VALUES
-(5, NULL, 'loss', 0.05, '2026-11-12 08:00:00', 'Damaged carrots removed', 2),
-(6, NULL, 'loss', 25000.00, '2026-11-12 08:30:00', 'Bruised strawberries removed', 3),
-(9, NULL, 'loss', 30000.00, '2026-11-12 09:00:00', 'Strawberry spoilage', 3),
-(10, NULL, 'loss', 0.25, '2026-11-11 09:30:00', 'Expired carrot lot removed', 1),
-(4, NULL, 'correction_added', 10.00, '2026-11-12 10:00:00', 'Approved count correction after recount', 2);
-
+INSERT INTO StockMovements (lotID, allocationID, movementType, quantity, unit, dateOccurred, reason, performedBy) VALUES
+(5, NULL, 'loss', 0.05, 'ton', '2026-11-12 08:00:00', 'Damaged carrots removed', 2),
+(6, NULL, 'loss', 25000.00, 'g', '2026-11-12 08:30:00', 'Bruised strawberries removed', 3),
+(9, NULL, 'loss', 30000.00, 'g', '2026-11-12 09:00:00', 'Strawberry spoilage', 3),
+(10, NULL, 'loss', 0.25, 'ton', '2026-11-11 09:30:00', 'Expired carrot lot removed', 1),
+(4, NULL, 'correction_added', 10.00, 'kg', '2026-11-12 10:00:00', 'Approved count correction after recount', 2);
 
 INSERT INTO DeliveryReceipts (requestID, allocationID, expectedQuantity, receivedQuantity, discrepancyQuantity, unit, deliveryDate, confirmedBy) VALUES
 (1, 1, 120.00, 92.00, 28.00, 'kg', '2026-11-07 16:00:00', 4),
