@@ -1019,9 +1019,9 @@ def showProduceSearch(current_user):
                             imageName = str(
                                 imageData.iloc[0]["imageName"]
                             )
-                            imagePath = IMAGE_FOLDER / imageName
+                            imagePath = resolveHarvestImagePath(imageName)
 
-                            if imagePath.is_file():
+                            if imagePath is not None and imagePath.is_file():
                                 st.image(
                                     str(imagePath),
                                     use_container_width=True
@@ -1095,9 +1095,9 @@ def showProduceSearch(current_user):
 
             else:
                 for _, image in images.iterrows():
-                    imagePath = IMAGE_FOLDER / str(image["imageName"])
+                    imagePath = resolveHarvestImagePath(image["imageName"])
 
-                    if imagePath.is_file():
+                    if imagePath is not None and imagePath.is_file():
                         st.image(
                             str(imagePath),
                             caption=f"{lot['cropName']} — Lot {selectedLotID}",
@@ -1192,8 +1192,46 @@ def showProduceSearch(current_user):
                         st.success(message)
                     else:
                         st.error(message)
+def resolveHarvestImagePath(imageName):
+    """Find an image referenced by MySQL in the supported local image folders."""
+    imageName = str(imageName).strip()
+    if not imageName or Path(imageName).name != imageName:
+        return None
+
+    # The first directory is where this application saves new uploads.
+    # The second supports projects that kept seeded assets at repo/images/.
+    folders = (IMAGE_FOLDER, IMAGE_FOLDER.parent.parent / "images")
+    for folder in folders:
+        candidate = folder / imageName
+        if candidate.is_file():
+            return candidate
+
+        # Useful on case-sensitive systems if DB and disk differ in case.
+        if folder.is_dir():
+            for existing in folder.iterdir():
+                if existing.is_file() and existing.name.casefold() == imageName.casefold():
+                    return existing
+    return None
+
+
+def imagePixelFingerprint(image):
+    """Compare image appearance independent of JPG/PNG encoding or metadata."""
+    from PIL import ImageOps
+    import hashlib
+
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    if image.width * image.height > 20_000_000:
+        raise ValueError("Image dimensions are too large (20 MP maximum).")
+    digest = hashlib.sha256()
+    digest.update(f"{image.width}x{image.height}:RGB:".encode("ascii"))
+    digest.update(image.tobytes())
+    return digest.hexdigest()
+
+
 def showImages(current_user):
     st.header("Harvest lot images")
+    if "harvestImageMessage" in st.session_state:
+        st.success(st.session_state.pop("harvestImageMessage"))
 
     role = current_user["role"]
     user_id = int(current_user["userID"])
@@ -1259,7 +1297,7 @@ def showImages(current_user):
                 )
 
                 if uploaded:
-                    st.success(message)
+                    st.session_state.harvestImageMessage = message
                     st.rerun()
                 else:
                     st.warning(message)
@@ -1283,9 +1321,9 @@ def showImages(current_user):
             f"{image_row['farmName']}"
         )
 
-        image_path = IMAGE_FOLDER / image_name
+        image_path = resolveHarvestImagePath(image_name)
 
-        if image_path.is_file():
+        if image_path is not None and image_path.is_file():
             try:
                 st.image(
                     str(image_path),
@@ -1295,20 +1333,20 @@ def showImages(current_user):
 
             except Exception:
                 st.error(
-                    f"Image {image_number} is not available."
+                    f"Image {image_number} is not available: {image_name}. "
+                    f"The database record exists, but the file was not found in "
+                    f"{IMAGE_FOLDER} or {IMAGE_FOLDER.parent.parent / 'images'}."
                 )
 
         else:
             st.error(
-                f"Image {image_number} is not available."
+                f"Image {image_number} is not available: {image_name}. "
+                    f"The database record exists, but the file was not found in "
+                    f"{IMAGE_FOLDER} or {IMAGE_FOLDER.parent.parent / 'images'}."
             )
 
 
-def addHarvestImage(
-    lotID,
-    uploadedFile,
-    userID
-):
+def addHarvestImage(lotID, uploadedFile, userID):
     connection = None
     cursor = None
     savedPath = None
@@ -1316,114 +1354,112 @@ def addHarvestImage(
     try:
         if uploadedFile is None:
             return False, "Choose an image first."
-
         if uploadedFile.size > 5 * 1024 * 1024:
             return False, "The image must be 5 MB or smaller."
+
+        # Decode and normalize before comparing or saving. Metadata and
+        # different file encodings won't create false non-duplicates.
+        try:
+            from PIL import ImageOps
+            uploadedFile.seek(0)
+            with Image.open(uploadedFile) as source:
+                image = ImageOps.exif_transpose(source).convert("RGB")
+                image.load()
+            fingerprint = imagePixelFingerprint(image)
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as error:
+            return False, f"Please upload a valid JPG/PNG image: {error}"
 
         connection = getConnection()
         cursor = connection.cursor()
 
-        # Confirm ownership and retrieve the crop name.
-        cursor.execute("""SELECT c.cropName
-               FROM HarvestLots hl, CropCycle cc, Farms f, Crops c, OwnedBy o
-               WHERE hl.cycleID = cc.cycleID AND cc.farmID = f.farmID AND cc.cropID = c.cropID AND f.farmID = o.farmID AND hl.lotID = %s AND o.userID = %s""",(lotID, userID))
-
-        cropResult = cursor.fetchone()
-
-        if cropResult is None:
-            logActivity(
-                userID,
-                "access_denied",
-                f"Attempted to upload an image to harvest lot {lotID}"
-            )
-            return False, (
-                "This harvested lot does not belong to your farm."
-            )
-
-        cropName = str(cropResult[0]).strip().lower()
+        # Lock this harvest lot so simultaneous clicks cannot allocate
+        # the same image number or bypass the duplicate check.
+        cursor.execute(
+            """SELECT hl.lotID, c.cropName
+               FROM HarvestLots hl, CropCycle cc, Crops c, OwnedBy o
+               WHERE hl.cycleID = cc.cycleID
+               AND cc.cropID = c.cropID
+               AND cc.farmID = o.farmID
+               AND hl.lotID = %s
+               AND o.userID = %s
+               FOR UPDATE""",
+            (lotID, userID)
+        )
+        lotRow = cursor.fetchone()
+        if lotRow is None:
+            connection.rollback()
+            return False, "This harvested lot does not belong to your farm."
 
         safeCropName = re.sub(
-            r"[^a-z0-9]+",
-            "_",
-            cropName
-        ).strip("_")
+            r"[^a-z0-9]+", "_", str(lotRow[1]).strip().lower()
+        ).strip("_") or "produce"
 
         cursor.execute(
-            """SELECT MAX(imageNumber)
+            """SELECT imageNumber, imageName
                FROM HarvestLotImages
-               WHERE lotID = %s""",
+               WHERE lotID = %s
+               ORDER BY imageNumber""",
             (lotID,)
         )
+        existingImages = cursor.fetchall()
 
-        highestImageNumber = cursor.fetchone()[0]
+        # Duplicate detection is per lot, not across different farms/lots.
+        for imageNumber, existingName in existingImages:
+            existingPath = resolveHarvestImagePath(existingName)
+            if existingPath is None:
+                continue  # Legacy DB record with no corresponding file.
+            try:
+                with Image.open(existingPath) as stored:
+                    if imagePixelFingerprint(stored) == fingerprint:
+                        connection.rollback()
+                        return False, (
+                            "This exact image is already uploaded for this harvest lot "
+                            f"(image #{imageNumber})."
+                        )
+            except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+                # An unreadable historical image must not prevent new uploads.
+                print("Skipping unreadable existing image:", existingPath)
 
-        if highestImageNumber is None:
-            imageNumber = 1
-        else:
-            imageNumber = highestImageNumber + 1
+        imageNumber = max((int(row[0]) for row in existingImages), default=0) + 1
+        while True:
+            fileName = f"lot_{lotID}_{imageNumber}_{safeCropName}.png"
+            savedPath = IMAGE_FOLDER / fileName
+            # Never overwrite an orphaned file whose DB record was deleted.
+            if not savedPath.exists():
+                break
+            imageNumber += 1
 
-        fileName = (
-            f"lot_{lotID}_{imageNumber}_"
-            f"{safeCropName}.png"
-        )
-
-        savedPath = IMAGE_FOLDER / fileName
-
-        try:
-            uploadedFile.seek(0)
-            image = Image.open(uploadedFile)
-            image.verify()
-
-            uploadedFile.seek(0)
-            image = Image.open(uploadedFile).convert("RGB")
-
-            image.save(
-                savedPath,
-                format="PNG"
-            )
-
-        except (UnidentifiedImageError, OSError):
-            return False, (
-                "Upload a valid JPG, JPEG, or PNG image."
-            )
+        # Exclusive file creation guards against accidental overwrites.
+        with savedPath.open("xb") as target:
+            image.save(target, format="PNG")
 
         cursor.execute(
             """INSERT INTO HarvestLotImages
                (imageNumber, lotID, imageName)
                VALUES (%s, %s, %s)""",
-            (
-                imageNumber,
-                lotID,
-                fileName
-            )
+            (imageNumber, lotID, fileName)
         )
-
         connection.commit()
         logActivity(
-            userID,
-            "harvest_image_uploaded",
+            userID, "harvest_image_uploaded",
             f"Uploaded {fileName} for lot {lotID}"
         )
-
-        return True, f"Image uploaded as {fileName}."
+        return True, f"Image uploaded successfully as {fileName}."
 
     except Exception as error:
         if connection:
             connection.rollback()
-
-        if savedPath and savedPath.exists():
+        if savedPath is not None and savedPath.exists():
             savedPath.unlink()
-
         print("Image upload error:", error)
-
-        return False, "The image could not be uploaded."
+        return False, "The image could not be uploaded. Check the terminal for details."
 
     finally:
         if cursor:
             cursor.close()
-
         if connection:
             connection.close()
+
 
 
 # -----------------------------------------------------------------------------
@@ -3483,11 +3519,11 @@ def cancelReservedQuantity(
             """
             SELECT a.requestID, a.lotID, a.quantityAllocated,
                    hl.unit, a.allocStatus
-            FROM Allocations a
-            JOIN HarvestLots hl ON a.lotID = hl.lotID
-            JOIN CropCycle cc ON hl.cycleID = cc.cycleID
-            JOIN OwnedBy o ON cc.farmID = o.farmID
-            WHERE a.allocationID = %s
+            FROM Allocations a, HarvestLots hl, CropCycle cc, OwnedBy o
+            WHERE a.lotID = hl.lotID
+              AND hl.cycleID = cc.cycleID
+              AND cc.farmID = o.farmID
+              AND a.allocationID = %s
               AND o.userID = %s
             FOR UPDATE
             """,
@@ -3641,10 +3677,9 @@ def cancelReservedQuantity(
                         ELSE 0
                     END
                 ), 0)
-            FROM Allocations a
-            LEFT JOIN StockMovements sm
-                ON a.allocationID = sm.allocationID
-            WHERE a.requestID = %s
+            FROM Allocations a, StockMovements sm
+            WHERE a.allocationID = sm.allocationID
+              AND a.requestID = %s
             """,
             (requestID,)
         )
