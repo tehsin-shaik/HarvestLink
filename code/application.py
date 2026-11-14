@@ -1171,6 +1171,13 @@ def showProduceSearch(current_user):
             ["All"] + units
         )
 
+        # Pick the day the buyer wants the produce to be available.
+        availableOn = col5.date_input(
+            "Available on",
+            value=date.today(),
+            min_value=date.today()
+        )
+
         minimumQuantity = col6.number_input(
             "Minimum available",
             min_value=0.0
@@ -1180,8 +1187,8 @@ def showProduceSearch(current_user):
                         FROM HarvestLots hl, CropCycle cc, Farms f, Crops c
                         WHERE hl.cycleID = cc.cycleID AND cc.farmID = f.farmID AND cc.cropID = c.cropID AND hl.status = 1 AND hl.harvestDate <= %s AND (hl.sellByDate IS NULL OR hl.sellByDate >= %s)"""
         values = [
-            date.today(),
-            date.today()
+            availableOn,
+            availableOn
         ]
 
         if selectedCrop != "All":
