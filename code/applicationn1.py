@@ -2564,12 +2564,13 @@ def showHarvestManagement(current_user):
                 recorded = changeData(
                     """INSERT INTO StockMovements
                     (lotID, allocationID, movementType,
-                        quantity, dateOccurred, reason, performedBy)
-                    VALUES (%s, NULL, %s, %s, %s, %s, %s)""",
+                    quantity, unit, dateOccurred, reason, performedBy)
+                    VALUES (%s, NULL, %s, %s, %s, %s, %s, %s)""",
                     (
                         selectedLotID,
                         storedMovementType,
                         movementQuantity,
+                        lotUnit,
                         datetime.now(),
                         savedReason,
                         userID
@@ -2692,12 +2693,13 @@ def addHarvestLot(cycleID, quantity,unit, harvestDate,sellByDate,userID):
         cursor.execute(
             """INSERT INTO StockMovements
                (lotID, allocationID, movementType,
-                quantity, dateOccurred, reason, performedBy)
-               VALUES (%s, NULL, %s, %s, %s, %s, %s)""",
+                quantity, unit, dateOccurred, reason, performedBy)
+               VALUES (%s, NULL, %s, %s, %s, %s, %s, %s)""",
             (
                 lotID,
                 "added",
                 quantity,
+                unit,
                 movementDate,
                 "Initial harvested quantity",
                 userID
@@ -3405,13 +3407,14 @@ def createAllocation(
         cursor.execute(
             """INSERT INTO StockMovements
             (lotID, allocationID, movementType,
-                quantity, dateOccurred, reason, performedBy)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                quantity, unit, dateOccurred, reason, performedBy)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 lotID,
                 allocationID,
                 "reserved",
                 quantity,
+                lotUnit,
                 allocationDate,
                 f"Reserved for market request {requestID}",
                 userID
@@ -3552,14 +3555,15 @@ def cancelReservedQuantity(
             """
             INSERT INTO StockMovements
                 (lotID, allocationID, movementType,
-                 quantity, dateOccurred, reason, performedBy)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                 quantity, unit, dateOccurred, reason, performedBy)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 lotID,
                 allocationID,
                 "canceled",
                 cancellationQuantity,
+                unit,
                 cancellationDate,
                 savedReason,
                 userID
@@ -4345,13 +4349,14 @@ def confirmDelivery(allocationID, receivedQuantity, deliveryDate, userID):
             cursor.execute(
                 """INSERT INTO StockMovements
                    (lotID, allocationID, movementType, quantity,
-                    dateOccurred, reason, performedBy)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    unit, dateOccurred, reason, performedBy)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     lotID,
                     allocationID,
                     "reserved",
                     extraQuantity,
+                    unit,
                     movementDate,
                     "Extra quantity confirmed during delivery",
                     userID
@@ -4380,13 +4385,14 @@ def confirmDelivery(allocationID, receivedQuantity, deliveryDate, userID):
             cursor.execute(
                 """INSERT INTO StockMovements
                    (lotID, allocationID, movementType, quantity,
-                    dateOccurred, reason, performedBy)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    unit, dateOccurred, reason, performedBy)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     lotID,
                     allocationID,
                     "delivered",
                     receivedQuantity,
+                    unit,
                     movementDate,
                     "Delivery confirmed by market buyer",
                     userID
@@ -4397,13 +4403,14 @@ def confirmDelivery(allocationID, receivedQuantity, deliveryDate, userID):
             cursor.execute(
                 """INSERT INTO StockMovements
                    (lotID, allocationID, movementType, quantity,
-                    dateOccurred, reason, performedBy)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    unit, dateOccurred, reason, performedBy)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     lotID,
                     allocationID,
                     "canceled",
                     discrepancyQuantity,
+                    unit,
                     movementDate,
                     "Undelivered quantity released",
                     userID
