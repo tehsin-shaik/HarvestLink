@@ -1019,15 +1019,11 @@ def showProduceSearch(current_user):
                             imageName = str(
                                 imageData.iloc[0]["imageName"]
                             )
-                            imagePath = resolveHarvestImagePath(imageName)
-
-                            if imagePath is not None and imagePath.is_file():
-                                st.image(
-                                    str(imagePath),
-                                    use_container_width=True
-                                )
-                            else:
-                                st.caption("Image not available.")
+                            showHarvestImageFile(
+                                imageName,
+                                compact=True,
+                                use_container_width=True
+                            )
                         else:
                             st.caption("No image uploaded.")
 
@@ -1095,18 +1091,11 @@ def showProduceSearch(current_user):
 
             else:
                 for _, image in images.iterrows():
-                    imagePath = resolveHarvestImagePath(image["imageName"])
-
-                    if imagePath is not None and imagePath.is_file():
-                        st.image(
-                            str(imagePath),
-                            caption=f"{lot['cropName']} — Lot {selectedLotID}",
-                            use_container_width=True
-                        )
-                    else:
-                        st.warning(
-                            f"Image {image['imageNumber']} is not available."
-                        )
+                    showHarvestImageFile(
+                        image["imageName"],
+                        caption=f"{lot['cropName']} — Lot {selectedLotID}",
+                        use_container_width=True
+                    )
 
         with detailColumn:
             st.title(lot["cropName"])
@@ -1212,6 +1201,36 @@ def resolveHarvestImagePath(imageName):
                 if existing.is_file() and existing.name.casefold() == imageName.casefold():
                     return existing
     return None
+
+
+
+def showHarvestImageFile(imageName, caption=None, compact=False, **imageOptions):
+    """Show an image safely without exposing server paths or decoding errors."""
+    try:
+        imagePath = resolveHarvestImagePath(imageName)
+        if imagePath is None:
+            if compact:
+                st.caption("Image unavailable.")
+            else:
+                st.warning("This image is unavailable right now.")
+            return False
+
+        # Decode eagerly: broken images may otherwise fail inside st.image().
+        with Image.open(imagePath) as source:
+            source.load()
+            from PIL import ImageOps
+            displayImage = ImageOps.exif_transpose(source).copy()
+
+        st.image(displayImage, caption=caption, **imageOptions)
+        return True
+    except Exception as error:
+        # Full diagnostic detail is for developers, never for the UI.
+        print(f"Harvest image display failed ({imageName!r}): {error!r}")
+        if compact:
+            st.caption("Image unavailable.")
+        else:
+            st.warning("This image cannot be displayed right now.")
+        return False
 
 
 def imagePixelFingerprint(image):
@@ -1321,35 +1340,18 @@ def showImages(current_user):
             f"{image_row['farmName']}"
         )
 
-        image_path = resolveHarvestImagePath(image_name)
-
-        if image_path is not None and image_path.is_file():
-            try:
-                st.image(
-                    str(image_path),
-                    caption=caption,
-                    width=350
-                )
-
-            except Exception:
-                st.error(
-                    f"Image {image_number} is not available: {image_name}. "
-                    f"The database record exists, but the file was not found in "
-                    f"{IMAGE_FOLDER} or {IMAGE_FOLDER.parent.parent / 'images'}."
-                )
-
-        else:
-            st.error(
-                f"Image {image_number} is not available: {image_name}. "
-                    f"The database record exists, but the file was not found in "
-                    f"{IMAGE_FOLDER} or {IMAGE_FOLDER.parent.parent / 'images'}."
-            )
+        showHarvestImageFile(
+            image_name,
+            caption=caption,
+            width=350
+        )
 
 
 def addHarvestImage(lotID, uploadedFile, userID):
     connection = None
     cursor = None
     savedPath = None
+    createdFile = False
 
     try:
         if uploadedFile is None:
@@ -1367,7 +1369,8 @@ def addHarvestImage(lotID, uploadedFile, userID):
                 image.load()
             fingerprint = imagePixelFingerprint(image)
         except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as error:
-            return False, f"Please upload a valid JPG/PNG image: {error}"
+            print("Image upload validation error:", repr(error))
+            return False, "Please choose a valid JPG or PNG image (maximum 5 MB)."
 
         connection = getConnection()
         cursor = connection.cursor()
@@ -1431,6 +1434,7 @@ def addHarvestImage(lotID, uploadedFile, userID):
 
         # Exclusive file creation guards against accidental overwrites.
         with savedPath.open("xb") as target:
+            createdFile = True
             image.save(target, format="PNG")
 
         cursor.execute(
@@ -1444,15 +1448,18 @@ def addHarvestImage(lotID, uploadedFile, userID):
             userID, "harvest_image_uploaded",
             f"Uploaded {fileName} for lot {lotID}"
         )
-        return True, f"Image uploaded successfully as {fileName}."
+        return True, "Image uploaded successfully."
 
     except Exception as error:
         if connection:
             connection.rollback()
-        if savedPath is not None and savedPath.exists():
-            savedPath.unlink()
-        print("Image upload error:", error)
-        return False, "The image could not be uploaded. Check the terminal for details."
+        if createdFile and savedPath is not None:
+            try:
+                savedPath.unlink(missing_ok=True)
+            except OSError as cleanupError:
+                print("Image cleanup error:", repr(cleanupError))
+        print("Image upload error:", repr(error))
+        return False, "The image could not be uploaded. Please try again."
 
     finally:
         if cursor:
