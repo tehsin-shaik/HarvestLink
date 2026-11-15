@@ -6271,145 +6271,240 @@ Results:
 
     return getLangChainText(response).strip()
 
-def showAssistant(current_user):
-    st.header("Database assistant")
-
-    st.caption(
-        "Ask a natural-language question about database records. "
-        "Only validated read-only SELECT queries can be executed."
-    )
-
-    exampleQuestions = [
+SPROUT_SUGGESTIONS = {
+    "farmer": [
         "Which crops are currently available?",
         "Which harvest lots have no available stock?",
         "What are the active expected harvests?",
         "Show pending market requests",
-        "Show delivery discrepancies"
-    ]
+        "Show delivery discrepancies",
+    ],
+    "user": [
+        "Which crops are currently available?",
+        "Show my requests",
+        "Show pending market requests",
+        "Show delivery discrepancies",
+    ],
+    "admin": [
+        "Which crops are currently available?",
+        "Which harvest lots have no available stock?",
+        "Show pending market requests",
+        "Show delivery discrepancies",
+    ],
+}
 
-    selectedExample = st.selectbox(
-        "Example questions",
-        ["Write my own question"] + exampleQuestions
-    )
+SPROUT_AVATAR = ":material/eco:"
 
-    if selectedExample == "Write my own question":
-        question = st.text_input(
-            "Your question",
-            placeholder="For example: Which crops are currently available?"
-        )
-    else:
-        question = selectedExample
 
-    askSubmitted = st.button(
-        "Ask assistant",
-        use_container_width=True
-    )
-
-    if not askSubmitted:
-        return
+def answerSproutQuestion(question, current_user, onStep=lambda label: None):
+    # Runs the same checks as before and returns the reply instead of drawing it.
+    def reply(kind, text, results=None, sql=None):
+        return {"role": "assistant", "kind": kind, "text": text, "results": results, "sql": sql}
 
     if not question.strip():
-        st.warning("Enter a question first.")
-        return
+        return reply("note", "Enter a question first.")
 
     if isPrivateAssistantQuestion(question, current_user["role"]):
-        st.warning("Access denied. You cannot view other users' private records.")
         logActivity(current_user["userID"], "assistant_access_denied", "Private data request blocked")
-        return
+        return reply("blocked", "Access denied. You cannot view other users' private records.")
 
     # Fixed, date-specific availability queries avoid ambiguous model output.
     directAvailability = directAvailabilityQuestion(question)
     if directAvailability and directAvailability[0] == "message":
-        st.info(directAvailability[1])
-        return
+        return reply("info", directAvailability[1])
 
     # Handle common request questions without calling the model.
     directRequest = directRequestQuestion(question, current_user)
     if directRequest and directRequest[0] == "message":
-        st.info(directRequest[1])
-        return
+        return reply("info", directRequest[1])
 
     try:
+        onStep("Reading the database structure")
         schemaText = getSchemaText()
 
         if not schemaText:
-            st.warning(
-                "The database structure could not be read."
-            )
-            return
+            return reply("note", "The database structure could not be read.")
 
-        with st.spinner("Preparing your answer..."):
-            if directAvailability and directAvailability[0] == "sql":
-                sql = directAvailability[1]
-            elif directRequest and directRequest[0] == "sql":
-                sql = directRequest[1]
-            else:
-                sql = generateSQL(question, schemaText, current_user)
+        if directAvailability and directAvailability[0] == "sql":
+            sql = directAvailability[1]
+        elif directRequest and directRequest[0] == "sql":
+            sql = directRequest[1]
+        else:
+            onStep("Writing a query for your question")
+            sql = generateSQL(question, schemaText, current_user)
 
-            if sql == "NOT_ANSWERABLE":
-                st.info(
-                    "This question cannot be answered clearly "
-                    "using the current database."
-                )
-                return
+        if sql == "NOT_ANSWERABLE":
+            return reply("info", "This question cannot be answered clearly using the current database.")
 
+        onStep("Checking the query is read-only and allowed")
+        try:
+            safeSQL = prepareAssistantSQL(sql, current_user)
+        except ValueError as error:
+            logActivity(current_user["userID"], "assistant_query_blocked", "SQL authorization check failed")
+            return reply("blocked", f"The generated query was blocked: {error}")
+
+        onStep("Fetching the records")
+        results = runAssistantSQL(safeSQL)
+
+        if directAvailability and directAvailability[0] == "sql":
+            answer = formatDirectAvailabilityAnswer(results, directAvailability[2])
+        elif directRequest:
+            answer = formatDirectRequestAnswer(results)
+        else:
+            onStep("Summarising the answer")
             try:
-                safeSQL = prepareAssistantSQL(sql, current_user)
-            except ValueError as error:
-                st.warning(f"The generated query was blocked: {error}")
-                logActivity(current_user["userID"], "assistant_query_blocked", "SQL authorization check failed")
-                return
+                answer = summarizeAssistantAnswer(question, safeSQL, results)
+            except Exception as error:
+                # Keep supporting SQL and rows visible if Gemini's quota runs out.
+                if "RESOURCE_EXHAUSTED" not in str(error) and "429" not in str(error):
+                    raise
+                answer = ("The records were retrieved, but Gemini's API quota "
+                          "prevented an automatic summary. Review the supporting "
+                          "records below.")
 
-            results = runAssistantSQL(safeSQL)
-
-            if directAvailability and directAvailability[0] == "sql":
-                answer = formatDirectAvailabilityAnswer(results, directAvailability[2])
-            elif directRequest:
-                answer = formatDirectRequestAnswer(results)
-            else:
-                try:
-                    answer = summarizeAssistantAnswer(question, safeSQL, results)
-                except Exception as error:
-                    # Keep supporting SQL and rows visible if Gemini's quota runs out.
-                    if "RESOURCE_EXHAUSTED" not in str(error) and "429" not in str(error):
-                        raise
-                    answer = ("The records were retrieved, but Gemini's API quota "
-                              "prevented an automatic summary. Review the supporting "
-                              "records below.")
-
-        st.subheader("Answer")
-        st.write(answer)
-
-        with st.expander("Supporting records"):
-            if results.empty:
-                st.info("No matching records were found.")
-            else:
-                showTable(
-                    results,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-        with st.expander("Generated read-only SQL"):
-            st.code(
-                safeSQL,
-                language="sql"
-            )
+        return reply("answer", answer, results, safeSQL)
 
     except ValueError as error:
-        st.warning(str(error))
+        return reply("note", str(error))
 
     except SQLAlchemyError as error:
         print("Assistant database error:", error)
-        st.error(
-            "The database assistant could not retrieve the records."
-        )
+        return reply("error", "The database assistant could not retrieve the records.")
 
     except Exception as error:
         print("Assistant error:", error)
-        st.error(
-            "The assistant could not answer this question right now."
+        return reply("error", "The assistant could not answer this question right now.")
+
+
+def showSproutMessage(message, key):
+    from html import escape
+
+    if message["role"] == "user":
+        with st.chat_message("user"):
+            st.markdown(
+                f'<div class="hl-sprout-question">{escape(message["text"])}</div>',
+                unsafe_allow_html=True
+            )
+        return
+
+    with st.chat_message("assistant", avatar=SPROUT_AVATAR):
+        if message["kind"] in ("blocked", "error", "note"):
+            icon = {"blocked": "lock", "error": "error", "note": "info"}[message["kind"]]
+            st.markdown(
+                f'<div class="hl-sprout-note hl-sprout-note-{message["kind"]}">'
+                f'<span class="material-symbols-rounded" aria-hidden="true">{icon}</span>'
+                f'<span>{escape(message["text"])}</span></div>',
+                unsafe_allow_html=True
+            )
+            return
+
+        st.markdown(message["text"])
+
+        if message["kind"] != "answer":
+            return
+
+        results = message["results"]
+        count = 0 if results is None else len(results)
+        with st.expander(
+            f"Records ({count})",
+            icon=":material/table_rows:",
+            key=f"{key}_records"
+        ):
+            if results is None or results.empty:
+                st.info("No matching records were found.")
+            else:
+                showTable(results)
+
+        with st.expander(
+            "SQL used",
+            icon=":material/code:",
+            key=f"{key}_sql"
+        ):
+            st.code(message["sql"], language="sql")
+
+
+def askSprout(question):
+    st.session_state["sprout_pending"] = question
+
+
+def showAssistant(current_user):
+    from html import escape
+
+    history = st.session_state.setdefault("sprout_chat", [])
+
+    titleCol, actionCol = st.columns([0.75, 0.25], vertical_alignment="center")
+    with titleCol:
+        st.markdown(
+            '<div class="hl-sprout-head"><span class="hl-sprout-logo">'
+            '<span class="material-symbols-rounded" aria-hidden="true">eco</span></span>'
+            '<div><h1>Sprout AI</h1><span class="hl-sprout-badge">'
+            '<span class="material-symbols-rounded" aria-hidden="true">lock</span>'
+            'Read-only · only sees records you\'re allowed to see</span></div></div>',
+            unsafe_allow_html=True
         )
+    with actionCol:
+        with st.container(horizontal=True, horizontal_alignment="right"):
+            if history and st.button(
+                "New chat",
+                icon=":material/add_comment:",
+                key="sprout_new_chat"
+            ):
+                history.clear()
+                st.rerun()
+
+    question = st.chat_input(
+        "Ask Sprout about your crops, stock, requests or deliveries",
+        key="sprout_input"
+    )
+    question = question or st.session_state.pop("sprout_pending", None)
+
+    # Queue the question first so a new one sent mid-answer is not lost.
+    if question:
+        history.append({"role": "user", "text": question})
+
+    if not history:
+        firstName = str(current_user.get("fname") or current_user["fullname"]).split()[0]
+        st.markdown(
+            f'<div class="hl-sprout-welcome"><span class="hl-sprout-eyebrow">Your farm assistant</span>'
+            f'<h2>Hi {escape(firstName)}, what would you like to know?</h2>'
+            '<p>Ask a question in plain words. Sprout looks up the answer in HarvestLink '
+            'and shows the records and query it used.</p></div>',
+            unsafe_allow_html=True
+        )
+        suggestions = SPROUT_SUGGESTIONS.get(current_user["role"], SPROUT_SUGGESTIONS["user"])
+        with st.container(key="sprout_chips", horizontal=True, horizontal_alignment="center"):
+            for index, suggestion in enumerate(suggestions):
+                st.button(
+                    suggestion,
+                    key=f"sprout_chip_{index}",
+                    on_click=askSprout,
+                    args=(suggestion,)
+                )
+        return
+
+    for index, message in enumerate(history):
+        showSproutMessage(message, f"sprout_msg_{index}")
+
+        answered = index + 1 < len(history) and history[index + 1]["role"] == "assistant"
+        if message["role"] != "user" or answered:
+            continue
+
+        with st.chat_message("assistant", avatar=SPROUT_AVATAR):
+            progress = st.empty()
+
+            def showStep(label):
+                progress.markdown(
+                    f'<div class="hl-sprout-thinking"><span class="hl-sprout-dots">'
+                    f'<i></i><i></i><i></i></span>{escape(label)}…</div>',
+                    unsafe_allow_html=True
+                )
+
+            showStep("Checking your question")
+            reply = answerSproutQuestion(message["text"], current_user, showStep)
+            progress.empty()
+
+        history.insert(index + 1, reply)
+        st.rerun()
 
 
 # -----------------------------------------------------------------------------
@@ -6474,6 +6569,7 @@ def main():
         "Search produce": "Shop",
         "User management": "Users",
         "Operational records": "Records",
+        "Assistant": "Sprout AI",
     }
 
     # Reject an invalid or unknown role
@@ -6549,6 +6645,8 @@ def main():
         st.session_state.currentUser = None
         st.session_state.pop("sessionStartedAt", None)
         st.session_state.pop("selectedProduceLot", None)
+        st.session_state.pop("sprout_chat", None)
+        st.session_state.pop("sprout_pending", None)
         st.session_state.signedOutMessage = True
         st.rerun()
 
