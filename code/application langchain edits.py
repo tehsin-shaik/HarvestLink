@@ -2445,6 +2445,214 @@ def addHarvestImage(lotID, uploadedFile, userID):
 # Farmer pages
 # -----------------------------------------------------------------------------
 
+def setAddCycleOpen(isOpen):
+    st.session_state["fm_add_open"] = isOpen
+
+
+@st.dialog("Edit crop cycle", width="medium")
+def editCropCycleDialog(cycle, farmID, units):
+    from html import escape
+
+    cycleID = int(cycle.cycleID)
+    st.markdown(
+        '<div class="hl-release-head">'
+        f'<strong>{escape(str(cycle.cropName))} · Cycle #{cycleID}</strong>'
+        '<span>Change what you expect to harvest and when.</span></div>',
+        unsafe_allow_html=True
+    )
+
+    cycleUnits = list(units)
+    currentUnit = str(cycle.expectedUnit)
+    if currentUnit not in cycleUnits:
+        cycleUnits.append(currentUnit)
+
+    selectedDate = pd.to_datetime(cycle.expectedHarvestDate, errors="coerce")
+    selectedDate = date.today() if pd.isna(selectedDate) else selectedDate.date()
+
+    with st.form(f"update_cycle_form_{cycleID}", border=False):
+        yieldColumn, unitColumn = st.columns(2)
+        updatedExpectedYield = yieldColumn.number_input(
+            "Expected quantity",
+            min_value=0.01,
+            value=float(cycle.expectedYield)
+        )
+
+        updatedExpectedUnit = unitColumn.selectbox(
+            "Expected unit",
+            cycleUnits,
+            index=cycleUnits.index(currentUnit)
+        )
+
+        updatedExpectedDate = st.date_input(
+            "Expected harvest date",
+            value=selectedDate
+        )
+
+        updateCycleSubmitted = st.form_submit_button(
+            "Save changes",
+            type="primary",
+            icon=":material/check:",
+            width="stretch"
+        )
+
+    if updateCycleSubmitted:
+        updated = changeData(
+            "UPDATE CropCycle SET expectedYield = %s, expectedUnit = %s, expectedHarvestDate = %s WHERE cycleID = %s AND farmID = %s",
+            (
+                updatedExpectedYield,
+                updatedExpectedUnit,
+                updatedExpectedDate,
+                cycleID,
+                farmID
+            )
+        )
+
+        if updated:
+            st.session_state.farmManagementMessage = (
+                "Crop cycle updated successfully."
+            )
+
+            st.rerun()
+
+
+def cycleHistoryRowHtml(row):
+    from html import escape
+
+    expected = pd.to_datetime(row.expectedHarvestDate, errors="coerce")
+    dayText, monthText = ("—", "") if pd.isna(expected) else (str(expected.day), expected.strftime("%b").upper())
+    lotCount = int(row.lotCount)
+    lotText = f"{lotCount} lot{'' if lotCount == 1 else 's'}"
+    if lotCount == 0:
+        harvestedText, pillText, pillClass = "Nothing harvested", "No harvest", "hl-alloc-pill hl-alloc-pill-off"
+    elif int(row.unitCount) == 1:
+        harvestedText = f"{formatQuantity(float(row.harvestedTotal), str(row.lotUnit))} harvested from {lotText}"
+        pillText, pillClass = "Finished", "hl-alloc-pill hl-alloc-pill-done"
+    else:
+        harvestedText = f"{lotText} harvested in different units"
+        pillText, pillClass = "Finished", "hl-alloc-pill hl-alloc-pill-done"
+    yearText = "" if pd.isna(expected) else f" {expected.year}"
+    return (
+        f'<div class="hl-alloc-row"><div class="hl-alloc-date"><b>{dayText}</b><span>{monthText}</span></div>'
+        f'<div class="hl-alloc-main"><strong>{escape(str(row.cropName))} · Cycle #{int(row.cycleID)}</strong>'
+        f'<small>Expected {escape(formatQuantity(float(row.expectedYield), str(row.expectedUnit)))}'
+        f' on {dayText} {monthText.title()}{yearText}</small>'
+        f'<small>{escape(harvestedText)}</small></div>'
+        f'<div class="hl-alloc-side"><span class="{pillClass}">{pillText}</span></div></div>'
+    )
+
+
+@st.dialog("Record harvest", width="medium")
+def recordCycleHarvestDialog(cycle, units, userID):
+    from html import escape
+
+    selectedCycleID = int(cycle.cycleID)
+    cycleUnit = str(cycle.expectedUnit)
+    expectedDate = readableDate(cycle.expectedHarvestDate) or "no date set"
+    st.markdown(
+        '<div class="hl-release-head">'
+        f'<strong>{escape(str(cycle.cropName))} · Cycle #{selectedCycleID}</strong>'
+        f'<span>Expecting {escape(formatQuantity(cycle.expectedYield, cycleUnit))} '
+        f'on {expectedDate}. The harvested lot is added to your stock.</span></div>',
+        unsafe_allow_html=True
+    )
+
+    with st.form(f"record_harvest_{selectedCycleID}", border=False):
+        quantityColumn, unitColumn = st.columns(2)
+        actualQuantity = quantityColumn.number_input(
+            "Actual quantity harvested",
+            min_value=0.01,
+            value=0.01
+        )
+
+        unitIndex = units.index(cycleUnit) if cycleUnit in units else 0
+        actualUnit = unitColumn.selectbox(
+            "Unit",
+            units,
+            index=unitIndex,
+            help=(
+                f"This cycle expects {cycleUnit}. Stock is never converted between "
+                f"units, so a lot in another unit won't match {cycleUnit} requests."
+            )
+        )
+
+        harvestColumn, sellByColumn = st.columns(2)
+        harvestDate = harvestColumn.date_input(
+            "Harvest date",
+            value=date.today(),
+            max_value=date.today()
+        )
+        sellByDate = sellByColumn.date_input(
+            "Sell-by date (optional)",
+            value=None
+        )
+        recordHarvestSubmitted = st.form_submit_button(
+            "Save harvested lot",
+            type="primary",
+            icon=":material/check:",
+            width="stretch"
+        )
+        if sellByDate is not None and sellByDate < harvestDate:
+            st.warning(
+                "The sell-by date cannot be before the harvest date."
+            )
+
+    if recordHarvestSubmitted:
+        created, lotID, message = addHarvestLot(
+            cycleID=selectedCycleID,
+            quantity=actualQuantity,
+            unit=actualUnit,
+            harvestDate=harvestDate,
+            sellByDate=sellByDate,
+            userID=userID
+        )
+
+        if created:
+            st.session_state.farmManagementMessage = (
+                "Harvest recorded successfully. "
+                "You can add photos of it from the Images page."
+            )
+            st.rerun()
+        else:
+            st.warning(message)
+
+
+def cropCycleCardHtml(cycle, imageName):
+    from html import escape
+
+    crop = escape(str(cycle.cropName))
+    imageData = showcaseImageData(imageName) if imageName else None
+    if imageData:
+        photo = f'<img src="data:image/jpeg;base64,{imageData}" alt="{crop}">'
+    else:
+        photo = f'<span class="hl-produce-initial">{escape(str(cycle.cropName)[:1])}</span>'
+
+    expected = pd.to_datetime(cycle.expectedHarvestDate, errors="coerce")
+    if pd.isna(expected):
+        dayText, monthText, whenText, whenTone = "—", "", "No date set", ""
+    else:
+        daysLeft = (expected.date() - date.today()).days
+        dayText, monthText = str(expected.day), expected.strftime("%b").upper()
+        if daysLeft > 1:
+            whenText = f"Harvest in {daysLeft} days"
+            whenTone = "hl-cycle-when-soon" if daysLeft <= 7 else ""
+        elif daysLeft == 1:
+            whenText, whenTone = "Harvest tomorrow", "hl-cycle-when-soon"
+        elif daysLeft == 0:
+            whenText, whenTone = "Harvest today", "hl-cycle-when-soon"
+        else:
+            whenText = f"{-daysLeft} day{'' if daysLeft == -1 else 's'} overdue"
+            whenTone = "hl-cycle-when-late"
+
+    expectedText = escape(formatQuantity(cycle.expectedYield, cycle.expectedUnit))
+    return (
+        f'<article class="hl-cycle"><div class="hl-cycle-photo">{photo}</div>'
+        f'<div class="hl-cycle-body"><div class="hl-alloc-date"><b>{dayText}</b><span>{monthText}</span></div>'
+        f'<div class="hl-cycle-main"><strong>{crop}</strong>'
+        f'<small>Cycle #{int(cycle.cycleID)} · expecting {expectedText}</small>'
+        f'<span class="hl-cycle-when {whenTone}">{whenText}</span></div></div></article>'
+    )
+
+
 def showFarmManagement(current_user):
     st.header("Farm and crop-cycle management")
 
@@ -2454,8 +2662,6 @@ def showFarmManagement(current_user):
 
     userID = int(current_user["userID"])
 
-    if "selectedHarvestCycle" not in st.session_state:
-        st.session_state.selectedHarvestCycle = None
 
     if "newHarvestLotID" not in st.session_state:
         st.session_state.newHarvestLotID = None
@@ -2468,9 +2674,6 @@ def showFarmManagement(current_user):
 
         del st.session_state.farmManagementMessage
 
-    st.write(
-        f"Welcome, **{current_user['fname']}** **{current_user['lname']}**"
-    )
 
     farmData = selectData(
         """SELECT f.farmID, f.farmName, f.location
@@ -2521,44 +2724,60 @@ def showFarmManagement(current_user):
 
         return
 
-    with st.expander("Add another farm"):
-        with st.form("add_another_farm_form"):
-            newFarmName = st.text_input("Farm name")
-            newFarmLocation = st.text_input("Location or emirate")
-            addFarmSubmitted = st.form_submit_button("Add farm")
-
-        if addFarmSubmitted:
-            created, message = createFarmForUser(
-                userID,
-                newFarmName,
-                newFarmLocation
-            )
-
-            if created:
-                st.session_state.farmManagementMessage = message
-                st.rerun()
-            else:
-                st.warning(message)
-
-    farmOptions = makeOptions(
-        farmData,
-        "farmID",
-        ["farmName", "location"]
-    )
-    selectedFarmLabel = st.selectbox(
-        "Manage farm",
-        list(farmOptions.keys())
-    )
+    farmOptions = {
+        f"{farm.farmName} · {farm.location}": int(farm.farmID)
+        for farm in farmData.itertuples(index=False)
+    }
+    if len(farmOptions) > 1:
+        selectedFarmLabel = st.selectbox(
+            "Manage farm",
+            list(farmOptions.keys()),
+            key="fm_farm"
+        )
+    else:
+        selectedFarmLabel = next(iter(farmOptions))
     farmID = int(farmOptions[selectedFarmLabel])
     selectedFarm = farmData[farmData["farmID"] == farmID].iloc[0]
     farmName = str(selectedFarm["farmName"])
     farmLocation = str(selectedFarm["location"])
 
-    st.subheader(farmName)
-    st.caption(f"📍 {farmLocation}")
+    from html import escape
+    farmStats = selectData(
+        """SELECT
+               (SELECT COUNT(*) FROM CropCycle WHERE farmID = %s AND status = 1) AS activeCycles,
+               (SELECT COUNT(*) FROM HarvestLots hl, CropCycle cc
+                WHERE hl.cycleID = cc.cycleID AND cc.farmID = %s AND hl.status = 1) AS activeLots,
+               (SELECT MIN(expectedHarvestDate) FROM CropCycle
+                WHERE farmID = %s AND status = 1 AND expectedHarvestDate >= %s) AS nextHarvest""",
+        (farmID, farmID, farmID, date.today()),
+        show_error=False
+    )
+    statsHtml = ""
+    if not farmStats.empty:
+        stats = farmStats.iloc[0]
+        activeCycles = int(stats["activeCycles"])
+        activeLots = int(stats["activeLots"])
+        nextHarvest = readableDate(stats["nextHarvest"])
+        statsHtml = (
+            '<span><span class="material-symbols-rounded" aria-hidden="true">potted_plant</span>'
+            f'{activeCycles} active crop cycle{"" if activeCycles == 1 else "s"}</span>'
+            '<span><span class="material-symbols-rounded" aria-hidden="true">inventory_2</span>'
+            f'{activeLots} active lot{"" if activeLots == 1 else "s"}</span>'
+            '<span><span class="material-symbols-rounded" aria-hidden="true">event</span>'
+            f'{"Next harvest " + nextHarvest if nextHarvest else "No upcoming harvest"}</span>'
+        )
+
+    head = st.container(horizontal=True, vertical_alignment="center", key="fm_farm_head")
+    head.markdown(
+        '<div class="hl-farm-head"><span class="hl-record-kicker">YOUR FARM</span>'
+        f'<strong>{escape(farmName)}</strong><div class="hl-farm-meta">'
+        '<span><span class="material-symbols-rounded" aria-hidden="true">location_on</span>'
+        f'{escape(farmLocation)}</span>{statsHtml}</div></div>',
+        unsafe_allow_html=True
+    )
 
     # Edit the farmer's farm information.
-    with st.expander("Edit farm information"):
+    with head.popover("Edit farm", icon=":material/edit:"):
         with st.form("edit_farm_form"):
             updatedFarmName = st.text_input(
                 "Farm name",
@@ -2614,6 +2833,25 @@ def showFarmManagement(current_user):
 
                     st.rerun()
 
+    with head.popover("Add farm", icon=":material/add:"):
+        with st.form("add_another_farm_form"):
+            newFarmName = st.text_input("Farm name")
+            newFarmLocation = st.text_input("Location or emirate")
+            addFarmSubmitted = st.form_submit_button("Add farm")
+
+        if addFarmSubmitted:
+            created, message = createFarmForUser(
+                userID,
+                newFarmName,
+                newFarmLocation
+            )
+
+            if created:
+                st.session_state.farmManagementMessage = message
+                st.rerun()
+            else:
+                st.warning(message)
+
     crops = selectData(
         """SELECT cropID, cropName
            FROM Crops
@@ -2642,54 +2880,89 @@ def showFarmManagement(current_user):
 
         return str(crop["cropName"])
 
+    with st.container(
+        horizontal=True,
+        horizontal_alignment="distribute",
+        vertical_alignment="center",
+        key="fm_cycles_head"
+    ):
+        st.subheader("Active crop cycles", anchor=False)
+        if not st.session_state.get("fm_add_open"):
+            st.button(
+                "Add crop cycle",
+                type="primary",
+                icon=":material/add:",
+                key="fm_add_open_button",
+                on_click=setAddCycleOpen,
+                args=(True,)
+            )
+
     # Add a new crop cycle.
-    with st.expander("Add a crop cycle"):
-        with st.form("add_cycle_form"):
-            selectedCropID = st.selectbox(
-                "Crop",
-                cropIDs,
-                format_func=showCrop
+    if st.session_state.get("fm_add_open"):
+        with st.container(key="fm_add_panel"):
+            st.markdown(
+                '<div class="hl-record-head"><span class="hl-record-kicker">NEW CROP CYCLE</span>'
+                '<strong>Add a crop cycle</strong>'
+                f'<span>What you are growing at {escape(farmName)} and when you expect to harvest it.</span></div>',
+                unsafe_allow_html=True
             )
-
-            expectedYield = st.number_input(
-                "Expected quantity",
-                min_value=0.01,
-                value=0.01
-            )
-
-            expectedUnit = st.selectbox(
-                "Expected unit",
-                units,
-                index=units.index("kg") if "kg" in units else 0
-            )
-
-            expectedHarvestDate = st.date_input(
-                "Expected harvest date",
-                value=date.today(),
-                min_value=date.today()
-            )
-
-            addCycleSubmitted = st.form_submit_button(
-                "Add crop cycle"
-            )
-
-        if addCycleSubmitted:
-            created = changeData("INSERT INTO CropCycle(farmID, cropID, expectedUnit, expectedYield, expectedHarvestDate, status) VALUES (%s, %s, %s, %s, %s, 1)",
-                (
-                    farmID,
-                    selectedCropID,
-                    expectedUnit,
-                    expectedYield,
-                    expectedHarvestDate
-                )
-            )
-
-            if created:
-                st.session_state.farmManagementMessage = (
-                    "Crop cycle added successfully."
+            with st.form("add_cycle_form", border=False):
+                selectedCropID = st.selectbox(
+                    "Crop",
+                    cropIDs,
+                    format_func=showCrop
                 )
 
-                st.rerun()
+                yieldColumn, unitColumn = st.columns(2)
+                expectedYield = yieldColumn.number_input(
+                    "Expected quantity",
+                    min_value=0.01,
+                    value=0.01
+                )
+
+                expectedUnit = unitColumn.selectbox(
+                    "Expected unit",
+                    units,
+                    index=units.index("kg") if "kg" in units else 0
+                )
+
+                expectedHarvestDate = st.date_input(
+                    "Expected harvest date",
+                    value=date.today(),
+                    min_value=date.today()
+                )
+
+                addCycleSubmitted = st.form_submit_button(
+                    "Add crop cycle",
+                    type="primary",
+                    icon=":material/check:"
+                )
+
+            st.button(
+                "Cancel",
+                key="fm_add_cancel",
+                on_click=setAddCycleOpen,
+                args=(False,)
+            )
+
+            if addCycleSubmitted:
+                created = changeData("INSERT INTO CropCycle(farmID, cropID, expectedUnit, expectedYield, expectedHarvestDate, status) VALUES (%s, %s, %s, %s, %s, 1)",
+                    (
+                        farmID,
+                        selectedCropID,
+                        expectedUnit,
+                        expectedYield,
+                        expectedHarvestDate
+                    )
+                )
+
+                if created:
+                    st.session_state.farmManagementMessage = (
+                        "Crop cycle added successfully."
+                    )
+                    st.session_state.fm_add_open = False
+
+                    st.rerun()
 
     cycles = selectData("""SELECT cc.cycleID, cc.cropID, c.cropName,cc.expectedYield, cc.expectedUnit, cc.expectedHarvestDate
        FROM CropCycle cc, Crops c
@@ -2697,282 +2970,111 @@ def showFarmManagement(current_user):
        ORDER BY cc.expectedHarvestDate""",(farmID,))
 
     cycleHistory = selectData(
-        """SELECT c.cropName, cc.expectedYield, cc.expectedUnit, cc.expectedHarvestDate
-           FROM CropCycle cc, Crops c
-           WHERE cc.cropID = c.cropID AND cc.farmID = %s AND cc.status = 0
+        """SELECT cc.cycleID, c.cropName, cc.expectedYield, cc.expectedUnit, cc.expectedHarvestDate,
+                  COUNT(hl.lotID) AS lotCount,
+                  COUNT(DISTINCT hl.unit) AS unitCount,
+                  MIN(hl.unit) AS lotUnit,
+                  SUM(hl.quantityHarvested) AS harvestedTotal
+           FROM CropCycle cc
+           JOIN Crops c ON cc.cropID = c.cropID
+           LEFT JOIN HarvestLots hl ON hl.cycleID = cc.cycleID
+           WHERE cc.farmID = %s AND cc.status = 0
+           GROUP BY cc.cycleID, c.cropName, cc.expectedYield, cc.expectedUnit, cc.expectedHarvestDate
            ORDER BY cc.expectedHarvestDate DESC""",
         (farmID,)
     )
 
-    with st.expander("Crop-cycle history"):
+    def showCycleHistory():
+        st.subheader(
+            f"Finished crop cycles ({len(cycleHistory)})",
+            anchor=False
+        )
         if cycleHistory.empty:
-            st.info("There are no completed crop cycles for this farm.")
-        else:
-            showTable(
-                pd.DataFrame({
-                    "Crop": cycleHistory["cropName"],
-                    "Expected yield": [
-                        formatQuantity(q, u)
-                        for q, u in zip(cycleHistory["expectedYield"], cycleHistory["expectedUnit"])
-                    ],
-                    "Expected harvest date": cycleHistory["expectedHarvestDate"],
-                }),
-                width="stretch",
-                hide_index=True
+            st.markdown(
+                '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+                'history</span><span>No finished crop cycles for this farm yet.</span></div>',
+                unsafe_allow_html=True
             )
+        else:
+            rows = "".join(
+                cycleHistoryRowHtml(row)
+                for row in cycleHistory.itertuples(index=False)
+            )
+            st.markdown(f'<div class="hl-alloc-list">{rows}</div>', unsafe_allow_html=True)
 
-    st.subheader("Active crop cycles")
     if cycles.empty:
         st.info("No crop cycles have been entered.")
+        showCycleHistory()
         return
 
-    # Display cycle rows with a Record harvest button.
-    heading1, heading2, heading3, heading4, heading5 = st.columns(
-        [2, 2, 2, 1, 1]
+    cycleImages = selectData(
+        """SELECT c.cropName, hi.imageName
+           FROM HarvestLotImages hi
+           JOIN HarvestLots hl ON hi.lotID = hl.lotID
+           JOIN CropCycle cc ON hl.cycleID = cc.cycleID
+           JOIN Crops c ON cc.cropID = c.cropID
+           LEFT JOIN OwnedBy o ON o.farmID = cc.farmID AND o.userID = %s
+           ORDER BY (o.userID IS NULL), hl.harvestDate DESC, hi.imageNumber""",
+        (userID,),
+        show_error=False
+    )
+    cropCovers = {} if cycleImages.empty else (
+        cycleImages.drop_duplicates("cropName").set_index("cropName")["imageName"].to_dict()
     )
 
-    heading1.write("**Crop**")
-    heading2.write("**Expected quantity**")
-    heading3.write("**Expected harvest date**")
-    heading4.write("")
-    heading5.write("")
-    for _, cycle in cycles.iterrows():
-        column1, column2, column3, column4, column5 = st.columns(
-            [2, 2, 2, 1, 1]
-        )
-
-        cycleID = int(cycle["cycleID"])
-
-        column1.write(cycle["cropName"])
-
-        column2.write(
-            f"{float(cycle['expectedYield']):,.2f} "
-            f"{cycle['expectedUnit']}"
-        )
-
-        column3.write(
-            str(cycle["expectedHarvestDate"])
-        )
-
-        if column4.button(
-            "Record harvest",
-            key=f"record_cycle_{cycleID}"
-        ):
-            st.session_state.selectedHarvestCycle = cycleID
-            st.rerun()
-
-        if column5.button(
-            "Finish cycle",
-            key=f"finish_cycle_{cycleID}"
-        ):
-            finished, message = finishCropCycle(
-                cycleID,
-                userID
-            )
-
-            if finished:
-                st.session_state.selectedHarvestCycle = None
-                st.session_state.farmManagementMessage = message
-                st.rerun()
-            else:
-                st.warning(message)
-
-    if st.session_state.selectedHarvestCycle is not None:
-        selectedCycleID = int(
-            st.session_state.selectedHarvestCycle
-        )
-
-        selectedCycleData = cycles[
-            cycles["cycleID"] == selectedCycleID
-        ]
-
-        if selectedCycleData.empty:
-            st.warning(
-                "The selected crop cycle is unavailable."
-            )
-
-            st.session_state.selectedHarvestCycle = None
-
-        else:
-            selectedCycle = selectedCycleData.iloc[0]
-
-            with st.expander(
-                f"Record {selectedCycle['cropName']} harvest",
-                expanded=True
-            ):
-                with st.form(
-                    f"record_harvest_{selectedCycleID}"
-                ):
-                    actualQuantity = st.number_input(
-                        "Actual quantity harvested",
-                        min_value=0.01,
-                        value=0.01
-                    )
-
-                    cycleUnit = str(
-                        selectedCycle["expectedUnit"]
-                    )
-
-                    if cycleUnit in units:
-                        unitIndex = units.index(cycleUnit)
-                    else:
-                        unitIndex = 0
-
-                    actualUnit = st.selectbox(
-                        "Unit",
-                        units,
-                        index=unitIndex
-                    )
-
-                    harvestDate = st.date_input(
-                        "Harvest date",
-                        value=date.today(),
-                        max_value=date.today()
-                    )
-                    sellByDate = st.date_input(
-                        "Sell-by date (optional)",
-                        value=None
-                    )
-                    recordHarvestSubmitted = (
-                        st.form_submit_button(
-                            "Save harvested lot"
-                        )
-                    )
-                    if (
-                        sellByDate is not None
-                        and sellByDate < harvestDate
-                    ):
-                        st.warning(
-                            "The sell-by date cannot be before the harvest date."
-                        )
-                cancelHarvest = st.button(
-                    "Cancel",
-                    key="cancel_harvest"
+    for cardStart in range(0, len(cycles), 2):
+        columns = st.columns(2)
+        for column, cycle in zip(columns, cycles.iloc[cardStart:cardStart + 2].itertuples(index=False)):
+            cycleID = int(cycle.cycleID)
+            with column, st.container(key=f"fm_cyc_card_{cycleID}"):
+                st.markdown(
+                    cropCycleCardHtml(cycle, cropCovers.get(str(cycle.cropName))),
+                    unsafe_allow_html=True
                 )
+                with st.container(horizontal=True, gap="small", key=f"fm_cyc_actions_{cycleID}"):
+                    if st.button(
+                        "Record harvest",
+                        key=f"record_cycle_{cycleID}",
+                        type="primary",
+                        icon=":material/add:",
+                        width="stretch"
+                    ):
+                        recordCycleHarvestDialog(cycle, units, userID)
 
-                if cancelHarvest:
-                    st.session_state.selectedHarvestCycle = (
-                        None
-                    )
+                    if st.button(
+                        "",
+                        key=f"fm_edit_{cycleID}",
+                        icon=":material/edit:",
+                        help="Edit crop cycle"
+                    ):
+                        editCropCycleDialog(cycle, farmID, units)
 
-                    st.rerun()
-
-                if recordHarvestSubmitted:
-                    (
-                        created,
-                        lotID,
-                        message
-                    ) = addHarvestLot(
-                        cycleID=selectedCycleID,
-                        quantity=actualQuantity,
-                        unit=actualUnit,
-                        harvestDate=harvestDate,
-                        sellByDate=sellByDate,
-                        userID=userID
-                    )
-
-                    if created:
-                        st.session_state.selectedHarvestCycle = None
-
-                        st.session_state.farmManagementMessage = (
-                            "Harvest recorded successfully. "
-                            "You can upload images from Harvest management."
+                    with st.popover("Finish", icon=":material/task_alt:"):
+                        st.markdown(
+                            '<div class="hl-release-head"><strong>Finish this crop cycle?</strong>'
+                            f'<span>{cycle.cropName} · Cycle #{cycleID} moves to crop-cycle history '
+                            'and no longer appears when you record a harvest.</span></div>',
+                            unsafe_allow_html=True
                         )
+                        if st.button(
+                            "Yes, finish cycle",
+                            key=f"finish_cycle_{cycleID}",
+                            type="primary",
+                            width="stretch"
+                        ):
+                            finished, message = finishCropCycle(
+                                cycleID,
+                                userID
+                            )
 
-                        st.rerun()
-
-                    else:
-                        st.warning(message)
+                            if finished:
+                                st.session_state.farmManagementMessage = message
+                                st.rerun()
+                            else:
+                                st.warning(message)
 
     # Update an existing crop-cycle forecast.
-    with st.expander("Update a crop cycle"):
-        cycleIDs = cycles[
-            "cycleID"
-        ].astype(int).tolist()
-
-        def showCycle(cycleID):
-            cycle = cycles[
-                cycles["cycleID"] == cycleID
-            ].iloc[0]
-
-            return (
-                f"{cycle['cropName']} — "
-                f"{cycle['expectedYield']} "
-                f"{cycle['expectedUnit']} — "
-                f"{cycle['expectedHarvestDate']}"
-            )
-
-        selectedUpdateCycleID = st.selectbox(
-            "Crop cycle",
-            cycleIDs,
-            format_func=showCycle,
-            key="update_cycle"
-        )
-
-        updateCycle = cycles[
-            cycles["cycleID"] == selectedUpdateCycleID
-        ].iloc[0]
-
-        currentUnit = str(updateCycle["expectedUnit"])
-
-        if currentUnit not in units:
-            units = units + [currentUnit]
-
-        if currentUnit in units:
-            updateUnitIndex = units.index(currentUnit)
-        else:
-            updateUnitIndex = 0
-
-        selectedDate = updateCycle[
-            "expectedHarvestDate"
-        ]
-
-        if hasattr(selectedDate, "date"):
-            selectedDate = selectedDate.date()
-
-        with st.form("update_cycle_form"):
-            updatedExpectedYield = st.number_input(
-                "Updated expected quantity",
-                min_value=0.01,
-                value=float(updateCycle["expectedYield"])
-            )
-
-            updatedExpectedUnit = st.selectbox(
-                "Updated expected unit",
-                units,
-                index=updateUnitIndex
-            )
-
-            updatedExpectedDate = st.date_input(
-                "Updated expected harvest date",
-                value=selectedDate
-            )
-
-            updateCycleSubmitted = (
-                st.form_submit_button(
-                    "Save crop-cycle changes"
-                )
-            )
-
-        if updateCycleSubmitted:
-            updated = changeData(
-                "UPDATE CropCycle SET expectedYield = %s, expectedUnit = %s, expectedHarvestDate = %s WHERE cycleID = %s AND farmID = %s",
-                (
-                    updatedExpectedYield,
-                    updatedExpectedUnit,
-                    updatedExpectedDate,
-                    selectedUpdateCycleID,
-                    farmID
-                )
-            )
-
-            if updated:
-                st.session_state.farmManagementMessage = (
-                    "Crop cycle updated successfully."
-                )
-
-                st.rerun()
-
+    showCycleHistory()
 
 def setHarvestLotActive(lotID, isActive, userID):
     connection = None
