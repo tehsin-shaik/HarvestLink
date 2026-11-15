@@ -1202,8 +1202,43 @@ def showStatCards(cards):
     st.markdown(f'<div class="hl-stats">{cardHtml}</div>', unsafe_allow_html=True)
 
 
+def goToPage(page):
+    st.session_state["hl_nav_farmer"] = page
+
+
+def showWelcomeBand(current_user):
+    from html import escape
+
+    hour = datetime.now().hour
+    greeting = "Good morning" if hour < 12 else "Good afternoon" if hour < 18 else "Good evening"
+    firstName = str(current_user.get("fname") or current_user["fullname"]).split()[0]
+    today = date.today()
+
+    with st.container(key="hl_welcome"):
+        textCol, actionCol = st.columns([0.62, 0.38], vertical_alignment="center")
+
+        with textCol:
+            st.markdown(
+                f'<div class="hl-welcome-date">{today.strftime("%A")}, {today.day} {today.strftime("%B %Y")}</div>'
+                f'<h1 class="hl-welcome-title">{greeting}, <em>{escape(firstName)}</em></h1>'
+                '<p class="hl-welcome-sub">Here is how your harvests and market requests look today.</p>',
+                unsafe_allow_html=True
+            )
+
+        with actionCol:
+            recordCol, requestsCol = st.columns(2)
+            recordCol.button(
+                "Record harvest", icon=":material/add:", type="primary", width="stretch",
+                key="hl_quick_record", on_click=goToPage, args=("Harvest management",)
+            )
+            requestsCol.button(
+                "View requests", icon=":material/inbox:", width="stretch",
+                key="hl_quick_requests", on_click=goToPage, args=("Requests and allocations",)
+            )
+
+
 def showDashboard(current_user):
-    st.header("Availability dashboard")
+    showWelcomeBand(current_user)
 
     available = selectData(
         """SELECT hl.lotID, f.farmName, f.location, c.cropName, hl.quantityHarvested, hl.unit, hl.harvestDate, hl.sellByDate
