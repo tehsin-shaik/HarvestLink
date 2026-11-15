@@ -21,7 +21,17 @@ from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHas
 
 load_dotenv(override=True)
 
-st.set_page_config(page_title="Local Farm Market", page_icon="🌱", layout="wide")
+st.set_page_config(page_title="HarvestLink | Local Farm Market", page_icon="🌱", layout="wide")
+
+
+def loadAuthStyles():
+    # Keep appearance separate from authentication and database logic.
+    cssPath = Path(__file__).parent / "style.css"
+    if cssPath.is_file():
+        st.markdown(f"<style>{cssPath.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
+
+
+loadAuthStyles()
 
 IMAGE_FOLDER = Path(__file__).parent / "images"
 IMAGE_FOLDER.mkdir(exist_ok=True)
@@ -590,79 +600,99 @@ def signInUser(email, password):
 
 
 def showAuthentication():
-    st.subheader("Account access")
-    signInTab, signUpTab = st.tabs(["Sign in", "Sign up"])
+    # This marker applies the login theme only on the unauthenticated screen.
+    st.markdown('<div class="hl-auth-marker"></div>', unsafe_allow_html=True)
+    left, right = st.columns([1.03, 1], gap="large", vertical_alignment="center")
 
-    with signInTab:
-        with st.form("sign_in_form"):
-            signInEmail = st.text_input("Email", key="sign_in_email")
-            signInPassword = st.text_input(
-                "Password",
-                type="password",
-                key="sign_in_password"
-            )
-            signInSubmitted = st.form_submit_button("Sign in")
-
-        if signInSubmitted:
-            user, message = signInUser(signInEmail, signInPassword)
-
-            if user:
-                st.session_state.currentUser = user
-                st.session_state.sessionStartedAt = datetime.now()
-                st.success(message)
-                st.rerun()
-            else:
-                st.error(message)
-
-    with signUpTab:
-        roleLabel = st.selectbox(
-            "Account type",
-            ["Farmer", "User"],
-            key="sign_up_role"
+    with left:
+        st.markdown(
+            """<div class="hl-auth-brand">
+                <span class="hl-eyebrow">LOCAL FOOD • STRONGER COMMUNITIES</span>
+                <div class="hl-brand-icon">🌱</div>
+                <h1>Harvest<span>Link</span></h1>
+                <h2>Fresh connections.<br>Better harvests.</h2>
+                <p>Connect local farms and markets, track produce availability,
+                and make every harvest count.</p>
+                <div class="hl-brand-pills"><span>Farm inventory</span>
+                <span>Market requests</span><span>Secure access</span></div>
+            </div>""",
+            unsafe_allow_html=True
         )
 
-        with st.form("sign_up_form"):
-            firstName = st.text_input("First name")
-            lastName = st.text_input("Last name")
-            signUpEmail = st.text_input("Email", key="sign_up_email")
-            signUpPassword = st.text_input(
-                "Password",
-                type="password",
-                key="sign_up_password"
-            )
-            confirmPassword = st.text_input(
-                "Confirm password",
-                type="password"
-            )
+    with right:
+        st.markdown(
+            """<div class="hl-auth-heading">
+                <span class="hl-eyebrow">WELCOME TO HARVESTLINK</span>
+                <h2>Your account</h2>
+                <p>Sign in to continue or create a new account.</p>
+            </div>""",
+            unsafe_allow_html=True
+        )
+        signInTab, signUpTab = st.tabs(["Sign in", "Create account"])
 
-            farmName = ""
-            farmLocation = ""
-
-            if roleLabel == "Farmer":
-                farmName = st.text_input("First farm name")
-                farmLocation = st.text_input("Farm location or emirate")
-
-            signUpSubmitted = st.form_submit_button("Create account")
-
-        if signUpSubmitted:
-            if signUpPassword != confirmPassword:
-                st.error("The passwords do not match.")
-            else:
-                role = "farmer" if roleLabel == "Farmer" else "user"
-                created, message = signUpUser(
-                    firstName,
-                    lastName,
-                    signUpEmail,
-                    signUpPassword,
-                    role,
-                    farmName,
-                    farmLocation
+        with signInTab:
+            with st.form("sign_in_form"):
+                signInEmail = st.text_input(
+                    "Email address", placeholder="you@example.com", key="sign_in_email"
+                )
+                signInPassword = st.text_input(
+                    "Password", type="password", placeholder="Enter your password",
+                    key="sign_in_password"
+                )
+                signInSubmitted = st.form_submit_button(
+                    "Sign in to HarvestLink", use_container_width=True, type="primary"
                 )
 
-                if created:
-                    st.success(message)
+            if signInSubmitted:
+                user, message = signInUser(signInEmail, signInPassword)
+                if user:
+                    st.session_state.currentUser = user
+                    st.session_state.sessionStartedAt = datetime.now()
+                    st.rerun()
                 else:
                     st.error(message)
+
+        with signUpTab:
+            roleLabel = st.selectbox(
+                "Account type", ["Farmer", "User"], key="sign_up_role",
+                help="Farmers manage harvests; market users search and request produce."
+            )
+            with st.form("sign_up_form"):
+                nameLeft, nameRight = st.columns(2)
+                with nameLeft:
+                    firstName = st.text_input("First name")
+                with nameRight:
+                    lastName = st.text_input("Last name")
+                signUpEmail = st.text_input("Email address", key="sign_up_email")
+                signUpPassword = st.text_input(
+                    "Password", type="password", key="sign_up_password"
+                )
+                confirmPassword = st.text_input(
+                    "Confirm password", type="password"
+                )
+                farmName = ""
+                farmLocation = ""
+                if roleLabel == "Farmer":
+                    farmName = st.text_input("First farm name")
+                    farmLocation = st.text_input("Farm location or emirate")
+
+                signUpSubmitted = st.form_submit_button(
+                    "Create my account", use_container_width=True, type="primary"
+                )
+
+            if signUpSubmitted:
+                if signUpPassword != confirmPassword:
+                    st.error("The passwords do not match.")
+                else:
+                    role = "farmer" if roleLabel == "Farmer" else "user"
+                    created, message = signUpUser(
+                        firstName, lastName, signUpEmail, signUpPassword,
+                        role, farmName, farmLocation
+                    )
+                    if created:
+                        st.success(message)
+                    else:
+                        st.error(message)
 
 def makeOptions(dataframe, idColumn, labelColumns):
     options = {}
@@ -5967,7 +5997,8 @@ def showAssistant(current_user):
 
 
 def main():
-    st.title("Local Farm and Market Food Availability System")
+    if st.session_state.get("currentUser") is not None:
+        st.title("Local Farm and Market Food Availability System")
 
     st.sidebar.header("Database connection")
     st.sidebar.caption(
@@ -6004,12 +6035,15 @@ def main():
     currentUser = st.session_state.currentUser
     role = currentUser["role"]
 
-    st.sidebar.write(
-        f"Signed in as **{currentUser['fullname']}**"
+    # Compact account card and sign-out control, without changing session logic.
+    st.sidebar.markdown(
+        '<div class="hl-sidebar-account-label">CURRENT ACCOUNT</div>',
+        unsafe_allow_html=True
     )
-    st.sidebar.success(f"Role: {role}")
+    st.sidebar.write(f"**{currentUser['fullname']}**")
+    st.sidebar.caption(f"{role.capitalize()} account")
 
-    if st.sidebar.button("Sign out"):
+    if st.sidebar.button("Sign out", key="harvestlink_sign_out", use_container_width=True):
         sessionStarted = st.session_state.get("sessionStartedAt")
         details = "User signed out"
 

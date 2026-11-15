@@ -1,0 +1,30 @@
+/* HarvestLink: authentication-only styles. Main pages are intentionally unchanged. */
+.stApp:has(.hl-auth-marker) { background: #f7faf7; }
+.stApp:has(.hl-auth-marker) .block-container { max-width: 1180px; padding-top: 6vh; padding-bottom: 5rem; }
+.stApp:has(.hl-auth-marker) [data-testid="stSidebar"] { display: none; }
+.stApp:has(.hl-auth-marker) [data-testid="collapsedControl"] { display: none; }
+.hl-auth-marker { height: 0; overflow: hidden; }
+.hl-auth-brand { background: linear-gradient(146deg,#123c2e 0%,#1c6248 62%,#287554 100%); border-radius: 24px; padding: clamp(28px,5vw,58px); color: #fff; min-height: 540px; display:flex; flex-direction:column; justify-content:center; box-shadow:0 24px 60px rgba(18,60,46,.16); }
+.hl-eyebrow { font-size:11px; font-weight:800; letter-spacing: 1.8px; text-transform:uppercase; }
+.hl-auth-brand .hl-eyebrow {color: #c9e7d2;}
+.hl-brand-icon { font-size:42px; margin: 23px 0 10px; }
+.hl-auth-brand h1 {font-size: clamp(42px,5vw,68px); margin:0; font-weight:800; letter-spacing:-2.8px; line-height:1.1; color:#fff;}
+.hl-auth-brand h1 span {color:#bce9a3;}
+.hl-auth-brand h2 {font-size:clamp(24px,3vw,34px); line-height:1.2; font-weight:650; margin:32px 0 12px; color:#fff;}
+.hl-auth-brand p {font-size:15px; line-height:1.7; color:#dcefe4; max-width:370px; margin:0;}
+.hl-brand-pills {display:flex; gap:9px; flex-wrap:wrap; margin-top:30px;}
+.hl-brand-pills span {font-size:11px; color:#e5f5eb; border:1px solid rgba(255,255,255,.25); border-radius:100px; padding:7px 12px; background:rgba(255,255,255,.07);}
+.hl-auth-heading {padding:10px 0 22px;}
+.hl-auth-heading .hl-eyebrow {color:#2d8059;}
+.hl-auth-heading h2 {font-size:36px; color:#173c2d; font-weight:800; letter-spacing:-1px; margin:12px 0 5px;}
+.hl-auth-heading p {font-size:14px; color:#60756a; margin:0;}
+.stApp:has(.hl-auth-marker) [data-testid="stTabs"] [role="tablist"] {gap:16px;}
+.stApp:has(.hl-auth-marker) [data-testid="stForm"] {background:#fff; border:1px solid #e0eae2; border-radius:17px; padding:24px; box-shadow:0 10px 32px rgba(18,60,46,.06);}
+.stApp:has(.hl-auth-marker) [data-testid="stForm"] [data-testid="stBaseButton-primary"] {border-radius:10px; min-height:44px; background:#24724c; border-color:#24724c; font-weight:700;}
+.stApp:has(.hl-auth-marker) [data-testid="stForm"] [data-testid="stBaseButton-primary"]:hover {background:#185c3c; border-color:#185c3c;}
+.stApp:has(.hl-auth-marker) input {border-radius:9px;}
+.stApp:has(.hl-auth-marker) [data-testid="stTabs"] [role="tab"][aria-selected="true"] {color:#176943;}
+.hl-sidebar-account-label {color:#738477; font-size:10px; letter-spacing:1.5px; font-weight:800; margin-top:12px;}
+.st-key-harvestlink_sign_out button {border:1px solid #cfded3; background:transparent; color:#315946; border-radius:9px; font-weight:600;}
+.st-key-harvestlink_sign_out button:hover {border-color:#9bbfa9; color:#164a30; background:#eff7f0;}
+@media (max-width: 800px) { .hl-auth-brand {min-height:0; padding:28px; border-radius:18px;} .hl-auth-brand h2 {margin-top:17px;} .hl-brand-pills {margin-top:16px;} .stApp:has(.hl-auth-marker) .block-container {padding-top:2rem;} }
