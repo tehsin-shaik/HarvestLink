@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote_plus
 from PIL import Image, UnidentifiedImageError
@@ -1143,6 +1143,54 @@ def refreshLotStatus(lotID):
     # Stock availability is calculated; do not change the farmer's lot status.
     return
 
+
+def formatTableValue(value):
+    from decimal import Decimal
+
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return "—"
+
+    if isinstance(value, (float, Decimal)):
+        return f"{float(value):,.2f}".rstrip("0").rstrip(".")
+
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d %H:%M") if (value.hour or value.minute) else value.strftime("%Y-%m-%d")
+
+    return str(value)
+
+
+def showTable(data, **options):
+    # Plain HTML table so headers and cells can be centred and styled.
+    from html import escape
+
+    headerHtml = "".join(f"<th>{escape(str(column))}</th>" for column in data.columns)
+    rowHtml = "".join(
+        "<tr>" + "".join(f"<td>{escape(formatTableValue(value))}</td>" for value in row) + "</tr>"
+        for row in data.itertuples(index=False, name=None)
+    )
+    st.markdown(
+        f'<div class="hl-table-wrap"><table class="hl-table"><thead><tr>{headerHtml}</tr></thead>'
+        f"<tbody>{rowHtml}</tbody></table></div>",
+        unsafe_allow_html=True
+    )
+
+
+def formatQuantity(quantity, unit):
+    return f"{float(quantity):,.2f}".rstrip("0").rstrip(".") + f" {unit}"
+
+
+def showStatCards(cards):
+    from html import escape
+
+    cardHtml = "".join(
+        f'<div class="hl-stat hl-stat-{tone}"><span class="hl-stat-label">{escape(label)}</span>'
+        f'<span class="hl-stat-value">{escape(str(value))}</span>'
+        f'<span class="hl-stat-note">{escape(note)}</span></div>'
+        for label, value, note, tone in cards
+    )
+    st.markdown(f'<div class="hl-stats">{cardHtml}</div>', unsafe_allow_html=True)
+
+
 def showDashboard(current_user):
     st.header("Availability dashboard")
 
@@ -1160,62 +1208,115 @@ def showDashboard(current_user):
            ORDER BY cc.expectedHarvestDate""",
         (current_user["userID"],)
     )
+    openRequests = selectData(
+        """SELECT COUNT(*) AS openRequests
+           FROM MarketRequests mr
+           WHERE mr.reqStatus IN ('pending', 'partiallyFulfilled') AND mr.cropID IN (
+               SELECT cc.cropID FROM CropCycle cc, OwnedBy o
+               WHERE cc.farmID = o.farmID AND o.userID = %s AND cc.status = 1)""",
+        (current_user["userID"],)
+    )
+    openRequestCount = 0 if openRequests.empty else int(openRequests.iloc[0]["openRequests"])
+
+    if available.empty:
+        available = pd.DataFrame(columns=[
+            "lotID", "farmName", "location", "cropName", "quantityHarvested",
+            "unit", "harvestDate", "sellByDate"
+        ])
+
+    for column in ["stockOnHand", "reservedQuantity", "availableQuantity"]:
+        available[column] = 0.0
+
+    for index, lot in available.iterrows():
+        stockOnHand, reservedQuantity, availableQuantity = calculateLotAvailability(int(lot["lotID"]))
+
+        if availableQuantity is None:
+            continue
+
+        available.at[index, "stockOnHand"] = float(stockOnHand)
+        available.at[index, "reservedQuantity"] = float(reservedQuantity)
+        available.at[index, "availableQuantity"] = float(availableQuantity)
+
+    inStock = available[available["availableQuantity"] > 0].copy()
+    reservedByUnit = (
+        available[available["reservedQuantity"] > 0]
+        .groupby("unit")["reservedQuantity"].sum()
+        .sort_values(ascending=False)
+    )
+    if reservedByUnit.empty:
+        mainUnit = available["unit"].mode().iloc[0] if not available.empty else ""
+        reservedValue = formatQuantity(0, mainUnit).strip()
+        reservedNote = "Nothing is reserved yet"
+    else:
+        reservedValue = formatQuantity(reservedByUnit.iloc[0], reservedByUnit.index[0])
+        extraUnits = len(reservedByUnit) - 1
+        reservedNote = (
+            f"Plus amounts in {extraUnits} other unit{'s' if extraUnits > 1 else ''}"
+            if extraUnits else "Held for market requests"
+        )
+
+    sellBy = pd.to_datetime(available["sellByDate"], errors="coerce").dt.date
+    expiringSoon = int(((sellBy >= date.today()) & (sellBy <= date.today() + timedelta(days=7))).sum())
+
+    showStatCards([
+        ("Available lots", len(inStock), f"{len(available)} harvest lots on record", "green"),
+        ("Reserved stock", reservedValue, reservedNote, "leaf"),
+        ("Open market requests", openRequestCount, "For crops you grow", "sand"),
+        ("Expiring this week", expiringSoon, "Sell-by date in the next 7 days", "warn" if expiringSoon else "sand"),
+    ])
+
     if available.empty:
         st.info("No harvested lots are available yet.")
 
     else:
-        available["stockOnHand"] = 0.0
-        available["reservedQuantity"] = 0.0
-        available["availableQuantity"] = 0.0
-
-        for index, lot in available.iterrows():
-            lotID = int(lot["lotID"])
-
-            stockOnHand, reservedQuantity, availableQuantity = (calculateLotAvailability(lotID))
-
-            if availableQuantity is None:
-                continue
-
-            available.at[index, "stockOnHand"] = float(stockOnHand)
-
-            available.at[index, "reservedQuantity"] = float( reservedQuantity)
-
-            available.at[index, "availableQuantity"] = float(availableQuantity)
-
-        totalsByUnit = (available.groupby("unit")[ [ "stockOnHand", "reservedQuantity", "availableQuantity"]] .sum().reset_index())
-
-        col1, col2 = st.columns(2)
-
-        col1.metric(
-            "Harvest lots",
-            len(available)
+        cropTotals = (
+            available.groupby(["cropName", "unit"])
+            .agg(
+                lots=("lotID", "count"),
+                stock=("stockOnHand", "sum"),
+                reserved=("reservedQuantity", "sum"),
+                availableNow=("availableQuantity", "sum"),
+                nextSellBy=("sellByDate", "min"),
+            )
+            .reset_index()
+            .sort_values("availableNow", ascending=False)
         )
-        if expected.empty:
-            activeCropCycles = 0
-        else:
-            activeCropCycles = (
-                pd.to_datetime(expected["expectedHarvestDate"]).dt.date
-                >= date.today()
-            ).sum()
 
-        col2.metric(
-    "Active crop cycles",
-    int(activeCropCycles)
-)
+        st.subheader("Stock by crop")
+        st.caption("Lots of the same crop and unit are added together.")
 
-        st.subheader("Quantity totals by unit")
-
-        st.dataframe(
-            totalsByUnit,
-            use_container_width=True,
+        showTable(
+            pd.DataFrame({
+                "Crop": cropTotals["cropName"],
+                "Lots": cropTotals["lots"],
+                "In stock": [formatQuantity(q, u) for q, u in zip(cropTotals["stock"], cropTotals["unit"])],
+                "Reserved": [formatQuantity(q, u) for q, u in zip(cropTotals["reserved"], cropTotals["unit"])],
+                "Available": [formatQuantity(q, u) for q, u in zip(cropTotals["availableNow"], cropTotals["unit"])],
+                "Next sell-by": cropTotals["nextSellBy"],
+            }),
+            width="stretch",
             hide_index=True
         )
 
         st.subheader("Harvested inventory")
 
-        st.dataframe(
-            available,
-            use_container_width=True,
+        def lotAmounts(column):
+            return [formatQuantity(q, u) for q, u in zip(available[column], available["unit"])]
+
+        showTable(
+            pd.DataFrame({
+                "Lot #": available["lotID"],
+                "Farm": available["farmName"],
+                "Location": available["location"],
+                "Crop": available["cropName"],
+                "Harvested": lotAmounts("quantityHarvested"),
+                "Harvest date": available["harvestDate"],
+                "Sell-by date": available["sellByDate"],
+                "In stock": lotAmounts("stockOnHand"),
+                "Reserved": lotAmounts("reservedQuantity"),
+                "Available": lotAmounts("availableQuantity"),
+            }),
+            width="stretch",
             hide_index=True
         )
 
@@ -1225,9 +1326,18 @@ def showDashboard(current_user):
         st.info("No expected harvests have been entered.")
 
     else:
-        st.dataframe(
-            expected,
-            use_container_width=True,
+        showTable(
+            pd.DataFrame({
+                "Crop cycle #": expected["cycleID"],
+                "Farm": expected["farmName"],
+                "Crop": expected["cropName"],
+                "Expected yield": [
+                    formatQuantity(q, u)
+                    for q, u in zip(expected["expectedYield"], expected["expectedUnit"])
+                ],
+                "Expected harvest date": expected["expectedHarvestDate"],
+            }),
+            width="stretch",
             hide_index=True
         )
 
@@ -2203,7 +2313,18 @@ def showFarmManagement(current_user):
         if cycleHistory.empty:
             st.info("There are no completed crop cycles for this farm.")
         else:
-            st.dataframe(cycleHistory, use_container_width=True, hide_index=True)
+            showTable(
+                pd.DataFrame({
+                    "Crop": cycleHistory["cropName"],
+                    "Expected yield": [
+                        formatQuantity(q, u)
+                        for q, u in zip(cycleHistory["expectedYield"], cycleHistory["expectedUnit"])
+                    ],
+                    "Expected harvest date": cycleHistory["expectedHarvestDate"],
+                }),
+                width="stretch",
+                hide_index=True
+            )
 
     st.subheader("Active crop cycles")
     if cycles.empty:
@@ -2776,7 +2897,7 @@ def showHarvestManagement(current_user):
                 "Sell-by date", "Stock on hand", "Reserved", "Available",
                 "Status"
             ]
-            st.dataframe(historyDisplay, use_container_width=True, hide_index=True)
+            showTable(historyDisplay, use_container_width=True, hide_index=True)
 
     with activeTab:
         if activeInventory.empty:
@@ -2792,7 +2913,7 @@ def showHarvestManagement(current_user):
                 "Sell-by date", "Stock on hand", "Reserved", "Available",
                 "Status"
             ]
-            st.dataframe(activeDisplay, use_container_width=True, hide_index=True)
+            showTable(activeDisplay, use_container_width=True, hide_index=True)
 
     # The farmer chooses if a lot is active; stock level does not change this flag.
     with st.expander("Activate or deactivate a harvest lot"):
@@ -3466,7 +3587,7 @@ def showFarmerAllocations(current_user):
             "Status"
         ]
 
-        st.dataframe(
+        showTable(
             displayedRequests,
             use_container_width=True,
             hide_index=True
@@ -3665,14 +3786,14 @@ def showFarmerAllocations(current_user):
             if activeDisplay.empty:
                 st.info("There are no active allocations.")
             else:
-                st.dataframe(activeDisplay, use_container_width=True, hide_index=True)
+                showTable(activeDisplay, use_container_width=True, hide_index=True)
 
         with allocationHistoryTab:
             historyDisplay = displayedAllocations[~activeMask]
             if historyDisplay.empty:
                 st.info("There are no past allocations.")
             else:
-                st.dataframe(historyDisplay, use_container_width=True, hide_index=True)
+                showTable(historyDisplay, use_container_width=True, hide_index=True)
 
     allocations["reservedRemaining"] = 0.0
 
@@ -4271,7 +4392,7 @@ def showMarketRequests(current_user):
             "Status"
         ]
 
-        st.dataframe(
+        showTable(
             displayedRequests,
             use_container_width=True,
             hide_index=True
@@ -4540,10 +4661,10 @@ def showDeliveries(current_user):
         if receipts.empty:
             st.info("You have not confirmed any deliveries yet.")
         else:
-            st.dataframe(receipts, use_container_width=True, hide_index=True)
+            showTable(receipts, use_container_width=True, hide_index=True)
         return
 
-    st.dataframe(allocations, use_container_width=True, hide_index=True)
+    showTable(allocations, use_container_width=True, hide_index=True)
     allocationOptions = makeOptions(
         allocations,
         "allocationID",
@@ -4608,7 +4729,7 @@ def showDeliveries(current_user):
 
     st.subheader("My delivery receipts")
     if not receipts.empty:
-        st.dataframe(receipts, use_container_width=True, hide_index=True)
+        showTable(receipts, use_container_width=True, hide_index=True)
 
 
 def confirmDelivery(allocationID, receivedQuantity, deliveryDate, userID):
@@ -4770,7 +4891,7 @@ def showAdminUserManagement(current_user):
         if users.empty:
             st.info("There are no user accounts.")
         else:
-            st.dataframe(users, use_container_width=True, hide_index=True)
+            showTable(users, use_container_width=True, hide_index=True)
             userOptions = makeOptions(
                 users,
                 "userID",
@@ -4894,7 +5015,7 @@ def showAdminUserManagement(current_user):
                     activity["actionType"] == selectedAction
                 ]
 
-            st.dataframe(activity, use_container_width=True, hide_index=True)
+            showTable(activity, use_container_width=True, hide_index=True)
 
 def showAdminReferenceData(current_user):
     st.header("Administrator reference data")
@@ -4913,7 +5034,7 @@ def showAdminReferenceData(current_user):
                FROM Users
                ORDER BY fname, lname"""
         )
-        st.dataframe(users, use_container_width=True, hide_index=True)
+        showTable(users, use_container_width=True, hide_index=True)
 
         with st.form("admin_add_user"):
             firstName = st.text_input("First name")
@@ -5002,7 +5123,7 @@ def showAdminReferenceData(current_user):
             displayCrops["Status"] = displayCrops["isActive"].map(
                 {1: "Active", 0: "Inactive", True: "Active", False: "Inactive"}
             )
-            st.dataframe(
+            showTable(
                 displayCrops[["cropID", "cropName", "Status"]].rename(
                     columns={"cropID": "Crop ID", "cropName": "Crop"}
                 ), use_container_width=True, hide_index=True
@@ -5061,7 +5182,7 @@ def showAdminReferenceData(current_user):
             displayMarkets["Status"] = displayMarkets["isActive"].map(
                 {1: "Active", 0: "Inactive", True: "Active", False: "Inactive"}
             )
-            st.dataframe(
+            showTable(
                 displayMarkets[["marketID", "marketName", "location", "Status"]].rename(
                     columns={"marketID": "Market ID", "marketName": "Market", "location": "Location"}
                 ), use_container_width=True, hide_index=True
@@ -5124,7 +5245,7 @@ def showAdminReferenceData(current_user):
             displayUnits["Status"] = displayUnits["isActive"].map(
                 {1: "Active", 0: "Inactive", True: "Active", False: "Inactive"}
             )
-            st.dataframe(
+            showTable(
                 displayUnits[["unitName", "Status"]].rename(
                     columns={"unitName": "Unit"}
                 ),
@@ -5229,7 +5350,7 @@ def showAdminOperations(current_user):
     if records.empty:
         st.info("There are no records in this table.")
     else:
-        st.dataframe(records, use_container_width=True, hide_index=True)
+        showTable(records, use_container_width=True, hide_index=True)
 
 
 # -----------------------------------------------------------------------------
@@ -6044,7 +6165,7 @@ def showAssistant(current_user):
             if results.empty:
                 st.info("No matching records were found.")
             else:
-                st.dataframe(
+                showTable(
                     results,
                     use_container_width=True,
                     hide_index=True
@@ -6078,19 +6199,6 @@ def showAssistant(current_user):
 
 
 def main():
-    st.sidebar.header("Database connection")
-    st.sidebar.caption(
-        f"Using {os.getenv('DB_NAME', 'DBProjGroup3')} from the .env file"
-    )
-
-    if st.sidebar.button("Test database connection"):
-        test = selectData("SELECT 1 AS connected")
-
-        if not test.empty:
-            st.sidebar.success(
-                f"Connected to {os.getenv('DB_NAME', 'DBProjGroup3')}."
-            )
-
     connectionTest = selectData(
         "SELECT 1 AS connected",
         show_error=False
@@ -6112,38 +6220,6 @@ def main():
 
     currentUser = st.session_state.currentUser
     role = currentUser["role"]
-
-    roleNames = {"farmer": "Farmer", "user": "Market buyer", "admin": "Administrator"}
-    initials = "".join(part[:1] for part in str(currentUser["fullname"]).split()[:2]).upper()
-    from html import escape
-
-    barLeft, barRight = st.columns([1, 0.16], vertical_alignment="center")
-    with barLeft:
-        showStoreBar(
-            f'<span class="hl-avatar">{escape(initials)}</span>'
-            f'<span class="hl-account"><b>{escape(str(currentUser["fullname"]))}</b>'
-            f'<small>{roleNames.get(role, role.capitalize())} account</small></span>'
-        )
-    with barRight:
-        signOutClicked = st.button(
-            "Sign out", key="harvestlink_sign_out", icon=":material/logout:",
-            use_container_width=True
-        )
-
-    if signOutClicked:
-        sessionStarted = st.session_state.get("sessionStartedAt")
-        details = "User signed out"
-
-        if sessionStarted:
-            duration = datetime.now() - sessionStarted
-            details = f"User signed out after {str(duration).split('.')[0]}"
-
-        logActivity(currentUser["userID"], "logout", details)
-        st.session_state.currentUser = None
-        st.session_state.pop("sessionStartedAt", None)
-        st.session_state.pop("selectedProduceLot", None)
-        st.session_state.signedOutMessage = True
-        st.rerun()
 
     # Pages allowed for each role
     rolePages = {
@@ -6171,13 +6247,91 @@ def main():
         ],
     }
 
+    # Shorter labels for the top navigation bar
+    navLabels = {
+        "Farm management": "Farms",
+        "Harvest management": "Harvests",
+        "Requests and allocations": "Requests",
+        "Search produce": "Shop",
+        "User management": "Users",
+        "Operational records": "Records",
+    }
+
     # Reject an invalid or unknown role
     if role not in rolePages:
         st.error("Your account does not have a valid role.")
         return
 
     pages = rolePages[role]
-    page = st.sidebar.radio("Navigation", pages)
+    roleNames = {"farmer": "Farmer", "user": "Market buyer", "admin": "Administrator"}
+    initials = "".join(part[:1] for part in str(currentUser["fullname"]).split()[:2]).upper()
+    from html import escape
+
+    with st.container(key="hl_topbar"):
+        logoCol, navCol, accountCol = st.columns(
+            [0.2, 0.62, 0.18], vertical_alignment="center"
+        )
+
+        with logoCol:
+            showStoreBar()
+
+        with navCol:
+            page = st.radio(
+                "Navigation",
+                pages,
+                horizontal=True,
+                key=f"hl_nav_{role}",
+                format_func=lambda option: navLabels.get(option, option),
+                label_visibility="collapsed",
+            )
+
+        with accountCol:
+            with st.popover(
+                str(currentUser["fullname"]),
+                icon=":material/account_circle:",
+                width="stretch",
+            ):
+                st.markdown(
+                    f'<div class="hl-account-card"><span class="hl-avatar">{escape(initials)}</span>'
+                    f'<span class="hl-account"><b>{escape(str(currentUser["fullname"]))}</b>'
+                    f'<small>{roleNames.get(role, role.capitalize())} account</small></span></div>',
+                    unsafe_allow_html=True
+                )
+                st.caption(
+                    f"Using {os.getenv('DB_NAME', 'DBProjGroup3')} from the .env file"
+                )
+
+                if st.button(
+                    "Test database connection",
+                    icon=":material/database:",
+                    width="stretch",
+                ):
+                    test = selectData("SELECT 1 AS connected")
+
+                    if not test.empty:
+                        st.success(
+                            f"Connected to {os.getenv('DB_NAME', 'DBProjGroup3')}."
+                        )
+
+                signOutClicked = st.button(
+                    "Sign out", key="harvestlink_sign_out", icon=":material/logout:",
+                    width="stretch"
+                )
+
+    if signOutClicked:
+        sessionStarted = st.session_state.get("sessionStartedAt")
+        details = "User signed out"
+
+        if sessionStarted:
+            duration = datetime.now() - sessionStarted
+            details = f"User signed out after {str(duration).split('.')[0]}"
+
+        logActivity(currentUser["userID"], "logout", details)
+        st.session_state.currentUser = None
+        st.session_state.pop("sessionStartedAt", None)
+        st.session_state.pop("selectedProduceLot", None)
+        st.session_state.signedOutMessage = True
+        st.rerun()
 
     if page == "Dashboard":
         showDashboard(currentUser)
