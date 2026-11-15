@@ -589,3 +589,43 @@ h1.hl-welcome-title em { font-style:italic; color:var(--hl-green); }
   [class*="st-key-alloc_row_"] { flex-wrap:wrap; padding:0 18px 14px 0; }
   [class*="st-key-alloc_row_"] [data-testid="stPopover"] { margin-left:82px; }
 }
+
+/* Harvests: lot cards */
+.hl-lot .hl-produce-head { flex-direction:column; align-items:flex-start; gap:2px; }
+.hl-lot-count { left:auto; right:10px; }
+.hl-lot-tag-good { color:#fff; background:var(--hl-green); }
+.hl-lot-tag-off { color:var(--hl-muted); background:#eceae4; }
+.hl-lot-foot { display:flex; flex-direction:column; gap:3px; }
+[class*="st-key-hv_card_"] { background:#fff; border:1px solid var(--hl-line); border-radius:18px; overflow:hidden; padding-bottom:18px; gap:14px; box-shadow:0 1px 2px rgba(28,26,23,.04); transition:transform .2s ease, box-shadow .2s ease; }
+[class*="st-key-hv_card_"]:hover { transform:translateY(-2px); box-shadow:0 12px 26px rgba(29,79,52,.10); }
+[class*="st-key-hv_card_"] .hl-produce, [class*="st-key-hv_card_"] .hl-produce:hover { border:0; border-radius:0; box-shadow:none; transform:none; }
+[class*="st-key-hv_card_"] [data-testid="stButton"] { padding:0 16px; }
+[class*="st-key-hv_card_"] [data-testid="stButton"] button { min-height:42px; }
+@media (max-width:640px) {
+  [class*="st-key-hv_card_"] .hl-produce-photo { aspect-ratio:auto; height:190px; }
+}
+.hl-lot .hl-produce-legend { flex-wrap:wrap; row-gap:4px; }
+.hl-lot .hl-produce-legend span { white-space:nowrap; }
+
+/* Harvests: record panel */
+.st-key-hv_record_panel { background:#fff; border:1px solid var(--hl-line); border-radius:20px; padding:22px 24px 24px; gap:14px; box-shadow:0 1px 2px rgba(28,26,23,.04); }
+.hl-record-head { display:flex; flex-direction:column; gap:2px; }
+.hl-record-kicker { font-size:11px; font-weight:700; letter-spacing:.12em; color:var(--hl-accent); }
+.hl-record-head strong { font-family:var(--hl-serif); font-size:26px; font-weight:600; color:var(--hl-ink); line-height:1.2; }
+.hl-record-head span:last-child { font-size:13.5px; color:var(--hl-muted); }
+.hl-record-head { margin-bottom:6px; }
+
+/* Harvests: per-lot actions */
+[class*="st-key-hv_actions_"] { padding:0 16px; flex-wrap:nowrap; }
+[class*="st-key-hv_card_"] [class*="st-key-hv_actions_"] [data-testid="stButton"] { padding:0; flex:1 1 auto; }
+[class*="st-key-hv_actions_"] [data-testid="stPopover"] { flex:0 0 auto; width:auto; }
+[class*="st-key-hv_actions_"] [data-testid="stPopover"] button { min-height:42px; min-width:44px; padding:0 10px; }
+
+/* Harvests: farm header */
+.st-key-hv_farm_head { background:#fff; border:1px solid var(--hl-line); border-radius:20px; padding:20px 24px; gap:16px; flex-wrap:wrap; box-shadow:0 1px 2px rgba(28,26,23,.04); }
+.st-key-hv_farm_head > div:first-child { flex:1 1 260px; }
+.hl-farm-head { display:flex; flex-direction:column; gap:4px; }
+.hl-farm-head strong { font-family:var(--hl-serif); font-size:28px; font-weight:600; color:var(--hl-ink); line-height:1.15; }
+.hl-farm-meta { display:flex; flex-wrap:wrap; gap:6px 16px; font-size:13.5px; color:var(--hl-muted); }
+.hl-farm-meta > span { display:inline-flex; align-items:center; gap:4px; }
+.hl-farm-meta .material-symbols-rounded { font-size:18px; color:var(--hl-accent); }

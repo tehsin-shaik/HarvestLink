@@ -1391,7 +1391,7 @@ def showWelcomeBand(current_user):
             recordCol, requestsCol = st.columns(2)
             recordCol.button(
                 "Record harvest", icon=":material/add:", type="primary", width="stretch",
-                key="hl_quick_record", on_click=goToPage, args=("Harvest management",)
+                key="hl_quick_record", on_click=goToRecordHarvest
             )
             requestsCol.button(
                 "View requests", icon=":material/inbox:", width="stretch",
@@ -2192,6 +2192,9 @@ def showImages(current_user):
         options[f"{row.cropName} · Lot #{row.lotID} · {row.farmName}{harvestedText}"] = row.lotID
 
     labelByLot = {lotID: label for label, lotID in options.items()}
+    pendingLotID = st.session_state.pop("pendingImageLotID", None)
+    if pendingLotID in labelByLot:
+        st.session_state["selected_image_lot"] = labelByLot[pendingLotID]
     showLotGallery(lots, labelByLot)
 
     selected_label = st.selectbox(
@@ -3006,6 +3009,318 @@ def setHarvestLotActive(lotID, isActive, userID):
             connection.close()
 
 
+HARVEST_LOT_STATUS = {
+    "available": ("Available", "hl-lot-tag-good"),
+    "no available stock": ("No stock left", "hl-lot-tag-off"),
+    "past sell-by date": ("Past sell-by", "hl-produce-tag-warn"),
+    "inactive": ("Inactive", "hl-lot-tag-off"),
+    "calculation unavailable": ("Check stock", "hl-produce-tag-warn"),
+}
+
+
+def readableDate(value):
+    parsed = pd.to_datetime(value, errors="coerce")
+    return None if pd.isna(parsed) else f"{parsed.day} {parsed.strftime('%b %Y')}"
+
+
+def harvestLotPhotos(farmID):
+    return selectData(
+        """SELECT hli.lotID, hli.imageName
+           FROM HarvestLotImages hli, HarvestLots hl, CropCycle cc
+           WHERE hli.lotID = hl.lotID AND hl.cycleID = cc.cycleID AND cc.farmID = %s
+           ORDER BY hli.lotID, hli.imageNumber""",
+        (farmID,),
+        show_error=False
+    )
+
+
+def harvestLotCardHtml(lot, imageData, photoCount):
+    from html import escape
+
+    crop = escape(str(lot.cropName))
+    unit = str(lot.unit)
+    label, tone = HARVEST_LOT_STATUS.get(
+        str(lot.saleStatus), (str(lot.saleStatus).capitalize(), "")
+    )
+
+    if imageData:
+        photo = f'<img src="data:image/jpeg;base64,{imageData}" alt="{crop}">'
+    else:
+        photo = f'<span class="hl-produce-initial">{escape(str(lot.cropName)[:1])}</span>'
+    countClass = " hl-gallery-count-none" if photoCount == 0 else ""
+    countText = "No photos" if photoCount == 0 else f'{photoCount} photo{"" if photoCount == 1 else "s"}'
+
+    onHandText = "" if pd.isna(lot.stockOnHand) else f"{formatQuantity(lot.stockOnHand, unit)} on hand · "
+    if pd.isna(lot.stockOnHand):
+        stockHtml = '<div class="hl-produce-available">Stock calculation unavailable</div>'
+    else:
+        stock = float(lot.stockOnHand)
+        reserved = float(lot.reservedQuantity)
+        available = float(lot.availableQuantity)
+        availablePercent = max(0, min(100, available / stock * 100 if stock > 0 else 0))
+        reservedPercent = max(0, min(100 - availablePercent, reserved / stock * 100 if stock > 0 else 0))
+        stockHtml = (
+            f'<div class="hl-produce-available"><b>{escape(formatQuantity(available, unit))}</b> available</div>'
+            f'<div class="hl-produce-bar" title="Available vs reserved">'
+            f'<span class="hl-bar-available" style="width:{availablePercent:.1f}%"></span>'
+            f'<span class="hl-bar-reserved" style="width:{reservedPercent:.1f}%"></span></div>'
+            f'<div class="hl-produce-legend"><span><i class="hl-dot-available"></i>{escape(formatQuantity(available, unit))} free</span>'
+            f'<span><i class="hl-dot-reserved"></i>{escape(formatQuantity(reserved, unit))} reserved</span></div>'
+        )
+
+    sellBy = pd.to_datetime(lot.sellByDate, errors="coerce")
+    if pd.isna(sellBy):
+        sellText = "No sell-by date"
+    else:
+        sellText = f"Sell by {sellBy.day} {sellBy.strftime('%b %Y')}"
+        if int(lot.status) == 1:
+            daysLeft = (sellBy.date() - date.today()).days
+            if daysLeft < 0:
+                sellText += f" · {-daysLeft} day{'' if daysLeft == -1 else 's'} past"
+            elif daysLeft == 0:
+                sellText += " · last day"
+            else:
+                sellText += f" · {daysLeft} day{'' if daysLeft == 1 else 's'} left"
+
+    return (
+        f'<article class="hl-produce hl-lot"><div class="hl-produce-photo">{photo}'
+        f'<span class="hl-produce-tag {tone}">{escape(label)}</span>'
+        f'<span class="hl-gallery-count hl-lot-count{countClass}">{countText}</span></div>'
+        f'<div class="hl-produce-body"><div class="hl-produce-head"><span class="hl-produce-name">{crop}</span>'
+        f'<span class="hl-produce-meta">Lot #{int(lot.lotID)} · harvested {readableDate(lot.harvestDate) or "—"}</span></div>'
+        f'{stockHtml}<div class="hl-produce-foot hl-lot-foot"><span>{escape(sellText)}</span>'
+        f'<span>{escape(onHandText)}Harvested {escape(formatQuantity(lot.quantityHarvested, unit))}</span></div></div></article>'
+    )
+
+
+def keepHarvestView():
+    if st.session_state.get("hv_view") is None:
+        st.session_state["hv_view"] = st.session_state.get("hv_view_last", "Cards")
+    st.session_state["hv_view_last"] = st.session_state["hv_view"]
+
+
+def openLotPhotos(lotID):
+    goToPage("Images")
+    st.session_state["pendingImageLotID"] = int(lotID)
+
+
+def showHarvestLotMenu(lot, userID):
+    lotID = int(lot.lotID)
+    isActive = int(lot.status) == 1
+
+    with st.popover("", icon=":material/more_vert:", help="Lot actions"):
+        st.markdown(
+            f'<div class="hl-release-head"><strong>{lot.cropName} · Lot #{lotID}</strong>'
+            f'<span>{"Active" if isActive else "Inactive"} lot</span></div>',
+            unsafe_allow_html=True
+        )
+        if isActive and st.button(
+            "Record loss or correction",
+            key=f"hv_adjust_{lotID}",
+            icon=":material/edit_note:",
+            width="stretch"
+        ):
+            lotAdjustmentDialog(lot, userID)
+
+        if st.button(
+            "Deactivate lot" if isActive else "Activate lot",
+            key=f"hv_toggle_{lotID}",
+            icon=":material/visibility_off:" if isActive else ":material/visibility:",
+            width="stretch"
+        ):
+            changed, message = setHarvestLotActive(lotID, not isActive, userID)
+            if changed:
+                st.session_state.stockMovementMessage = (
+                    f"Lot #{lotID} is now {'inactive' if isActive else 'active'}."
+                )
+                st.rerun()
+            else:
+                st.warning(message)
+        st.caption(
+            "Inactive lots move to History and can't be reserved for market requests."
+            if isActive else "Activating moves this lot back to Active."
+        )
+
+
+@st.dialog("Record a loss or correction")
+def lotAdjustmentDialog(lot, userID):
+    adjustmentVersion = st.session_state.stockAdjustmentVersion
+    selectedLotID = int(lot.lotID)
+    lotUnit = str(lot.unit)
+    availableQuantity = float(lot.availableQuantity)
+    keySuffix = f"{selectedLotID}_{adjustmentVersion}"
+
+    st.markdown(
+        f'<div class="hl-release-head"><strong>{lot.cropName} · Lot #{selectedLotID}</strong>'
+        f'<span>{formatQuantity(availableQuantity, lotUnit)} available. Losses and removals '
+        f'cannot be more than that.</span></div>',
+        unsafe_allow_html=True
+    )
+    movementType = st.segmented_control(
+        "Movement type",
+        ["loss", "correction"],
+        default="loss",
+        format_func=lambda value: "Loss" if value == "loss" else "Approved correction",
+        key=f"adjustment_type_{keySuffix}"
+    ) or "loss"
+
+    correctionConfirmed = True
+    correctionEffect = None
+
+    if movementType == "correction":
+        correctionEffect = st.radio(
+            "Correction effect",
+            ["Add stock", "Remove stock"],
+            horizontal=True,
+            key=f"correction_effect_{keySuffix}"
+        )
+        correctionConfirmed = st.checkbox(
+            "I confirm that this correction has been approved",
+            key=f"correction_confirmed_{keySuffix}"
+        )
+
+    enteredQuantity = st.number_input(
+        f"Quantity ({lotUnit})",
+        min_value=0.01,
+        value=0.01,
+        step=0.01,
+        key=f"adjustment_quantity_{keySuffix}"
+    )
+
+    if movementType == "loss":
+        storedMovementType = "loss"
+        movementQuantity = enteredQuantity
+        quantityRemoved = enteredQuantity
+        reasonLabel = "Reason for the loss (optional)"
+    elif correctionEffect == "Add stock":
+        storedMovementType = "correction_added"
+        movementQuantity = enteredQuantity
+        quantityRemoved = 0
+        reasonLabel = "Reason for the approved correction"
+    else:
+        storedMovementType = "correction_removed"
+        movementQuantity = enteredQuantity
+        quantityRemoved = enteredQuantity
+        reasonLabel = "Reason for the approved correction"
+
+    reason = st.text_area(
+        reasonLabel,
+        key=f"adjustment_reason_{keySuffix}"
+    )
+
+    submitted = st.button(
+        "Record stock movement",
+        type="primary",
+        width="stretch",
+        key=f"record_adjustment_{keySuffix}"
+    )
+
+    if submitted:
+        if reason.strip():
+            savedReason = reason.strip()
+        else:
+            savedReason = None
+
+        if (
+            movementType == "correction"
+            and not correctionConfirmed
+        ):
+            st.warning(
+                "Confirm that the correction has been approved."
+            )
+        elif (
+            movementType == "correction"
+            and savedReason is None
+        ):
+            st.warning(
+                "Enter the reason for the approved correction."
+            )
+        elif quantityRemoved > availableQuantity:
+            st.warning(
+                f"Only {availableQuantity:,.2f} "
+                f"{lotUnit} is currently available."
+            )
+        else:
+            recorded, adjustmentMessage = recordStockAdjustment(
+                selectedLotID, storedMovementType, movementQuantity,
+                lotUnit, savedReason, userID
+            )
+            if not recorded:
+                st.warning(adjustmentMessage)
+            if recorded:
+                logActivity(
+                    userID,
+                    "stock_movement_recorded",
+                    f"Recorded {storedMovementType} for lot {selectedLotID}"
+                )
+                if storedMovementType == "loss":
+                    message = (
+                        f"Loss recorded successfully. "
+                        f"{movementQuantity:,.2f} "
+                        f"{lotUnit} was removed from stock."
+                    )
+                elif storedMovementType == "correction_added":
+                    message = (
+                        f"Approved correction recorded successfully. "
+                        f"{movementQuantity:,.2f} "
+                        f"{lotUnit} was added to stock."
+                    )
+                else:
+                    message = (
+                        f"Approved correction recorded successfully. "
+                        f"{movementQuantity:,.2f} "
+                        f"{lotUnit} was removed from stock."
+                    )
+
+                st.session_state.stockMovementMessage = message
+
+                # New widget keys cause all adjustment inputs to reset.
+                st.session_state.stockAdjustmentVersion += 1
+
+                st.rerun()
+
+
+def showHarvestLotCards(lots, photos, withButtons, userID):
+    covers = {} if photos.empty else photos.drop_duplicates("lotID").set_index("lotID")["imageName"].to_dict()
+    counts = {} if photos.empty else photos.groupby("lotID").size().to_dict()
+
+    def cardFor(lot):
+        lotID = int(lot.lotID)
+        imageData = showcaseImageData(covers[lotID]) if lotID in covers else None
+        return harvestLotCardHtml(lot, imageData, int(counts.get(lotID, 0)))
+
+    if not withButtons:
+        cards = "".join(cardFor(lot) for lot in lots.itertuples(index=False))
+        st.markdown(f'<div class="hl-produce-grid">{cards}</div>', unsafe_allow_html=True)
+        return
+
+    for start in range(0, len(lots), 4):
+        columns = st.columns(4)
+        for column, lot in zip(columns, lots.iloc[start:start + 4].itertuples(index=False)):
+            lotID = int(lot.lotID)
+            with column, st.container(key=f"hv_card_{lotID}"):
+                st.markdown(cardFor(lot), unsafe_allow_html=True)
+                with st.container(horizontal=True, gap="small", key=f"hv_actions_{lotID}"):
+                    st.button(
+                        "Manage photos",
+                        key=f"hv_photos_{lotID}",
+                        icon=":material/photo_library:",
+                        on_click=openLotPhotos,
+                        args=(lotID,),
+                        width="stretch"
+                    )
+                    showHarvestLotMenu(lot, userID)
+
+
+def setHarvestRecordOpen(isOpen):
+    st.session_state["hv_record_open"] = isOpen
+
+
+def goToRecordHarvest():
+    goToPage("Harvest management")
+    st.session_state["hv_record_open"] = True
+
+
 def showHarvestManagement(current_user):
     st.header("Harvest and stock management")
     if "imageUploadMessage" in st.session_state:
@@ -3063,19 +3378,23 @@ def showHarvestManagement(current_user):
         st.info("Create your farm before recording harvests.")
         return
 
-    farmOptions = makeOptions(farmData, "farmID", ["farmName", "location"])
-    selectedFarmLabel = st.selectbox(
-        "Farm",
-        list(farmOptions.keys()),
-        key="harvest_management_farm"
-    )
+    farmOptions = {
+        f"{farm.farmName} · {farm.location}": int(farm.farmID)
+        for farm in farmData.itertuples(index=False)
+    }
+    if len(farmOptions) > 1:
+        selectedFarmLabel = st.selectbox(
+            "Farm",
+            list(farmOptions.keys()),
+            key="hv_farm"
+        )
+    else:
+        selectedFarmLabel = next(iter(farmOptions))
     selectedFarmID = int(farmOptions[selectedFarmLabel])
     selectedFarm = farmData[farmData["farmID"] == selectedFarmID].iloc[0]
     farmName = str(selectedFarm["farmName"])
     farmLocation = str(selectedFarm["location"])
 
-    st.subheader(farmName)
-    st.caption(f"📍 {farmLocation}")
 
     # Get only crop cycles belonging to this farmer.
     cycles = selectData( """SELECT cc.cycleID, c.cropName, cc.expectedYield, cc.expectedUnit, cc.expectedHarvestDate
@@ -3083,6 +3402,28 @@ def showHarvestManagement(current_user):
            WHERE cc.cropID = c.cropID AND cc.farmID = %s AND cc.status = 1
              AND c.isActive = 1
            ORDER BY cc.expectedHarvestDate""", (selectedFarmID,))
+
+    from html import escape
+    growingText = f"{len(cycles)} crop cycle{'' if len(cycles) == 1 else 's'} growing"
+    with st.container(horizontal=True, vertical_alignment="center", key="hv_farm_head"):
+        st.markdown(
+            '<div class="hl-farm-head"><span class="hl-record-kicker">YOUR FARM</span>'
+            f'<strong>{escape(farmName)}</strong><div class="hl-farm-meta">'
+            '<span><span class="material-symbols-rounded" aria-hidden="true">location_on</span>'
+            f'{escape(farmLocation)}</span>'
+            '<span><span class="material-symbols-rounded" aria-hidden="true">potted_plant</span>'
+            f'{growingText}</span></div></div>',
+            unsafe_allow_html=True
+        )
+        if not cycles.empty and not st.session_state.get("hv_record_open"):
+            st.button(
+                "Record harvest",
+                icon=":material/add:",
+                type="primary",
+                key="hv_record_toggle",
+                on_click=setHarvestRecordOpen,
+                args=(True,)
+            )
 
     if cycles.empty:
         st.info("Add a crop cycle before recording a harvest.")
@@ -3095,92 +3436,118 @@ def showHarvestManagement(current_user):
                 cycles["cycleID"] == cycleID
             ].iloc[0]
 
+            expectedDate = readableDate(cycle["expectedHarvestDate"]) or "no date set"
             return (
-                f"{cycle['cropName']} — "
-                f"expected {cycle['expectedYield']} "
-                f"{cycle['expectedUnit']} on "
-                f"{cycle['expectedHarvestDate']}"
+                f"{cycle['cropName']} · Cycle #{int(cycleID)} · expecting "
+                f"{formatQuantity(cycle['expectedYield'], cycle['expectedUnit'])} on {expectedDate}"
             )
 
-        with st.expander(
-            "Record a harvested lot",
-            expanded=True
-        ):
-            selectedCycleID = st.selectbox(
-                "Crop cycle",
-                cycleIDs,
-                format_func=showCycle,
-                key="harvest_cycle"
-            )
+        if st.session_state.get("hv_record_open"):
+            with st.container(key="hv_record_panel"):
+                st.markdown(
+                    '<div class="hl-record-head"><span class="hl-record-kicker">RECORD A HARVEST</span>'
+                    '<strong>New harvest lot</strong>'
+                    '<span>Pick the crop cycle, then enter what you harvested.</span></div>',
+                    unsafe_allow_html=True
+                )
+                selectedCycleID = st.selectbox(
+                    "Crop cycle",
+                    cycleIDs,
+                    format_func=showCycle,
+                    key="harvest_cycle"
+                )
 
-            selectedCycle = cycles[
-                cycles["cycleID"] == selectedCycleID
-            ].iloc[0]
+                selectedCycle = cycles[
+                    cycles["cycleID"] == selectedCycleID
+                ].iloc[0]
 
-            quantityHarvested = st.number_input(
-                "Quantity harvested",
-                min_value=0.01,
-                value=0.01,
-                step=0.01,
-                key="harvest_quantity"
-            )
+                expectedUnit = str(
+                    selectedCycle["expectedUnit"]
+                )
 
-            expectedUnit = str(
-                selectedCycle["expectedUnit"]
-            )
-
-            if expectedUnit in units:
-                defaultUnitIndex = units.index(expectedUnit)
-            else:
-                defaultUnitIndex = 0
-
-            unit = st.selectbox(
-                "Unit",
-                units,
-                index=defaultUnitIndex,
-                key="harvest_unit"
-            )
-
-            harvestDate = st.date_input(
-                "Harvest date",
-                value=date.today(),
-                max_value=date.today(),
-                key="harvest_date"
-            )
-
-            sellByDate = st.date_input(
-                "Sell-by date (optional)",
-                value=None,
-                key="sell_by_date"
-            )
-
-            recordHarvestSubmitted = st.button(
-                "Record harvest",
-                key="record_harvest"
-            )
-
-            if recordHarvestSubmitted:
-                if sellByDate is not None and sellByDate < harvestDate:
-                    st.warning(
-                        "The sell-by date cannot be before "
-                        "the harvest date."
-                    )
-
+                if expectedUnit in units:
+                    defaultUnitIndex = units.index(expectedUnit)
                 else:
-                    created, lotID, message = addHarvestLot(
-                        cycleID=selectedCycleID,
-                        quantity=quantityHarvested,
-                        unit=unit,
-                        harvestDate=harvestDate,
-                        sellByDate=sellByDate,
-                        userID=userID
+                    defaultUnitIndex = 0
+
+                quantityCol, unitCol = st.columns([2, 1])
+                with quantityCol:
+                    quantityHarvested = st.number_input(
+                        "Quantity harvested",
+                        min_value=0.01,
+                        value=0.01,
+                        step=0.01,
+                        key="harvest_quantity"
+                    )
+                with unitCol:
+                    unit = st.selectbox(
+                        "Unit",
+                        units,
+                        index=defaultUnitIndex,
+                        key="harvest_unit"
                     )
 
-                    if created:
-                        st.success(message)
-                        st.rerun()
+                if unit != expectedUnit:
+                    st.markdown(
+                        '<div class="hl-alloc-note"><span class="material-symbols-rounded" aria-hidden="true">'
+                        f'swap_horiz</span><span>This crop cycle expects <b>{expectedUnit}</b>. A lot saved in '
+                        f'<b>{unit}</b> only matches market requests in {unit}, because stock is never '
+                        'converted between units.</span></div>',
+                        unsafe_allow_html=True
+                    )
+
+                dateCol, sellByCol = st.columns(2)
+                with dateCol:
+                    harvestDate = st.date_input(
+                        "Harvest date",
+                        value=date.today(),
+                        max_value=date.today(),
+                        key="harvest_date"
+                    )
+                with sellByCol:
+                    sellByDate = st.date_input(
+                        "Sell-by date (optional)",
+                        value=None,
+                        key="sell_by_date"
+                    )
+
+                with st.container(horizontal=True, gap="small"):
+                    recordHarvestSubmitted = st.button(
+                        "Save harvest",
+                        type="primary",
+                        icon=":material/check:",
+                        key="record_harvest"
+                    )
+                    st.button(
+                        "Cancel",
+                        key="hv_record_cancel",
+                        on_click=setHarvestRecordOpen,
+                        args=(False,)
+                    )
+
+                if recordHarvestSubmitted:
+                    if sellByDate is not None and sellByDate < harvestDate:
+                        st.warning(
+                            "The sell-by date cannot be before "
+                            "the harvest date."
+                        )
+
                     else:
-                        st.warning(message)
+                        created, lotID, message = addHarvestLot(
+                            cycleID=selectedCycleID,
+                            quantity=quantityHarvested,
+                            unit=unit,
+                            harvestDate=harvestDate,
+                            sellByDate=sellByDate,
+                            userID=userID
+                        )
+
+                        if created:
+                            st.session_state.stockMovementMessage = message
+                            st.session_state.hv_record_open = False
+                            st.rerun()
+                        else:
+                            st.warning(message)
 
 
     inventory = selectData( """SELECT hl.lotID, c.cropName, hl.quantityHarvested, hl.unit, hl.harvestDate, hl.sellByDate, hl.status
@@ -3273,411 +3640,45 @@ def showHarvestManagement(current_user):
     activeInventory = inventory[inventory["status"] == 1].copy()
     historyInventory = inventory[inventory["status"] == 0].copy()
 
-    activeTab, historyTab = st.tabs(["Active inventory", "History"])
+    tableColumns = ["cropName", "quantityHarvested", "unit", "harvestDate",
+                    "sellByDate", "stockOnHand", "reservedQuantity",
+                    "availableQuantity", "saleStatus"]
+    tableLabels = ["Crop", "Quantity harvested", "Unit", "Harvest date",
+                   "Sell-by date", "Stock on hand", "Reserved", "Available",
+                   "Status"]
+    photos = harvestLotPhotos(selectedFarmID)
 
-    with historyTab:
-        if historyInventory.empty:
-            st.info("There are no completed harvest lots for this farm.")
-        else:
-            historyDisplay = historyInventory[
-                ["cropName", "quantityHarvested", "unit", "harvestDate",
-                 "sellByDate", "stockOnHand", "reservedQuantity",
-                 "availableQuantity", "saleStatus"]
-            ].copy()
-            historyDisplay.columns = [
-                "Crop", "Quantity harvested", "Unit", "Harvest date",
-                "Sell-by date", "Stock on hand", "Reserved", "Available",
-                "Status"
-            ]
-            showTable(historyDisplay, use_container_width=True, hide_index=True)
+    with st.container(horizontal=True, horizontal_alignment="right"):
+        view = st.segmented_control(
+            "Show as",
+            ["Cards", "Table"],
+            default="Cards",
+            key="hv_view",
+            on_change=keepHarvestView,
+            label_visibility="collapsed"
+        )
 
-    with activeTab:
-        if activeInventory.empty:
-            st.info("There are no active harvest lots for this farm.")
-        else:
-            activeDisplay = activeInventory[
-                ["cropName", "quantityHarvested", "unit", "harvestDate",
-                 "sellByDate", "stockOnHand", "reservedQuantity",
-                 "availableQuantity", "saleStatus"]
-            ].copy()
-            activeDisplay.columns = [
-                "Crop", "Quantity harvested", "Unit", "Harvest date",
-                "Sell-by date", "Stock on hand", "Reserved", "Available",
-                "Status"
-            ]
-            showTable(activeDisplay, use_container_width=True, hide_index=True)
-
-    # The farmer chooses if a lot is active; stock level does not change this flag.
-    with st.expander("Activate or deactivate a harvest lot"):
-        statusOptions = {
-            f"Lot {int(lot['lotID'])} - {lot['cropName']} ({'Active' if int(lot['status']) else 'Inactive'})": int(lot['lotID'])
-            for _, lot in inventory.iterrows()
-        }
-        selectedStatusLabel = st.selectbox("Harvest lot", list(statusOptions))
-        newStatus = st.radio("Set lot status", ["Active", "Inactive"], horizontal=True)
-        if st.button("Save lot status"):
-            changed, msg = setHarvestLotActive(statusOptions[selectedStatusLabel],
-                                               newStatus == "Active", userID)
-            if changed:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.warning(msg)
-
-    if activeInventory.empty:
-        return
-
-    inventory = activeInventory
-
-    # Display inventory without database IDs.
-    displayedInventory = inventory[
-        [
-            "cropName",
-            "quantityHarvested",
-            "unit",
-            "harvestDate",
-            "sellByDate",
-            "stockOnHand",
-            "reservedQuantity",
-            "availableQuantity",
-            "saleStatus"
-        ]
-    ].copy()
-
-    displayedInventory.columns = [
-        "Crop",
-        "Quantity harvested",
-        "Unit",
-        "Harvest date",
-        "Sell-by date",
-        "Stock on hand",
-        "Reserved",
-        "Available",
-        "Status"
-    ]
-
-    header1, header2, header3, header4 = st.columns(
-        [2.5, 1.5, 1.5, 1]
+    activeTab, historyTab = st.tabs(
+        [f"Active ({len(activeInventory)})", f"History ({len(historyInventory)})"]
     )
 
-    header1.write("**Harvested produce**")
-    header2.write("**Stock quantities**")
-    header3.write("**Status**")
-    header4.write("")
-
-    for _, lot in inventory.iterrows():
-        column1, column2, column3, column4 = st.columns(
-            [2.5, 1.5, 1.5, 1]
-        )
-
-        with column1:
-            st.write(f"**{lot['cropName']}**")
-
-            st.caption(
-                f"Harvested: {lot['harvestDate']}  \n"
-                f"Sell by: {lot['sellByDate']}  \n"
-                f"Original quantity: "
-                f"{float(lot['quantityHarvested']):,.2f} "
-                f"{lot['unit']}"
-            )
-
-        with column2:
-            if pd.isna(lot["stockOnHand"]):
-                st.write("Calculation unavailable")
-
+    for tab, lots, emptyText, withButtons in [
+        (historyTab, historyInventory, "There are no completed harvest lots for this farm.", True),
+        (activeTab, activeInventory, "There are no active harvest lots for this farm.", True),
+    ]:
+        with tab:
+            if lots.empty:
+                st.markdown(
+                    '<div class="hl-gallery-empty"><span class="material-symbols-rounded" '
+                    f'aria-hidden="true">inventory_2</span>{emptyText}</div>',
+                    unsafe_allow_html=True
+                )
+            elif view == "Table":
+                display = lots[tableColumns].copy()
+                display.columns = tableLabels
+                showTable(display, use_container_width=True, hide_index=True)
             else:
-                st.write(
-                    f"On hand: "
-                    f"{float(lot['stockOnHand']):,.2f} "
-                    f"{lot['unit']}"
-                )
-
-                st.write(
-                    f"Reserved: "
-                    f"{float(lot['reservedQuantity']):,.2f} "
-                    f"{lot['unit']}"
-                )
-
-                st.write(
-                    f"Available: "
-                    f"{float(lot['availableQuantity']):,.2f} "
-                    f"{lot['unit']}"
-                )
-
-        with column3:
-            st.write(str(lot["saleStatus"]))
-
-            existingImages = selectData(
-                """SELECT imageNumber
-                FROM HarvestLotImages
-                WHERE lotID = %s""",
-                (int(lot["lotID"]),),
-                show_error=False
-            )
-
-            st.caption(
-                f"{len(existingImages)} image(s)"
-            )
-
-        with column4:
-            if st.button(
-                "Upload images",
-                key=f"upload_images_{lot['lotID']}",
-                use_container_width=True
-            ):
-                st.session_state.selectedImageLotID = int(
-                    lot["lotID"]
-                )
-
-                st.rerun()
-
-        st.divider()
-
-  
-    inventoryRows = inventory.index.tolist()
-
-    def showLot(rowIndex):
-        lot = inventory.loc[rowIndex]
-
-        return (
-            f"{lot['cropName']} — "
-            f"harvested {lot['harvestDate']} — "
-            f"{lot['availableQuantity']:,.2f} "
-            f"{lot['unit']} available"
-        )
-    if st.session_state.selectedImageLotID is not None:
-        selectedImageLotID = int(
-            st.session_state.selectedImageLotID
-        )
-
-        selectedLotData = inventory[
-            inventory["lotID"] == selectedImageLotID
-        ]
-
-        if selectedLotData.empty:
-            st.warning(
-                "The selected harvested lot is unavailable."
-            )
-
-            st.session_state.selectedImageLotID = None
-
-        else:
-            selectedImageLot = selectedLotData.iloc[0]
-
-            with st.expander(
-                f"Upload {selectedImageLot['cropName']} images",
-                expanded=True
-            ):
-                uploadedFiles = st.file_uploader(
-                    "Select JPG or PNG images",
-                    type=["jpg", "jpeg", "png"],
-                    accept_multiple_files=True,
-                    key=f"inventory_images_{selectedImageLotID}"
-                )
-
-                uploadColumn, cancelColumn = st.columns(2)
-
-                uploadSubmitted = uploadColumn.button(
-                    "Upload selected images",
-                    key=f"save_inventory_images_{selectedImageLotID}",
-                    use_container_width=True
-                )
-
-                cancelUpload = cancelColumn.button(
-                    "Cancel",
-                    key=f"cancel_inventory_images_{selectedImageLotID}",
-                    use_container_width=True
-                )
-
-                if cancelUpload:
-                    st.session_state.selectedImageLotID = None
-                    st.rerun()
-
-                if uploadSubmitted:
-                    if not uploadedFiles:
-                        st.warning(
-                            "Select at least one image."
-                        )
-
-                    else:
-                        uploadedCount = 0
-                        failedCount = 0
-
-                        for uploadedFile in uploadedFiles:
-                            uploaded, message = addHarvestImage(
-                                selectedImageLotID,
-                                uploadedFile,
-                                userID
-                            )
-
-                            if uploaded:
-                                uploadedCount += 1
-                            else:
-                                failedCount += 1
-
-                        st.session_state.selectedImageLotID = None
-
-                        if failedCount > 0:
-                            st.session_state.imageUploadWarning = (
-                                f"{uploadedCount} image(s) uploaded. "
-                                f"{failedCount} image(s) could not "
-                                f"be uploaded."
-                            )
-
-                        else:
-                            st.session_state.imageUploadMessage = (
-                                f"{uploadedCount} image(s) "
-                                f"uploaded successfully."
-                            )
-
-                        st.rerun()
-    adjustmentVersion = (
-        st.session_state.stockAdjustmentVersion
-    )
-    with st.expander(
-        "Record a loss or approved correction"
-    ):
-        selectedRow = st.selectbox(
-            "Harvested stock",
-            inventoryRows,
-            format_func=showLot,
-            key=f"adjustment_lot_{adjustmentVersion}"
-        )
-
-        movementType = st.selectbox(
-            "Movement type",
-            ["loss", "correction"],
-            key=f"adjustment_type_{adjustmentVersion}"
-        )
-        selectedLot = inventory.loc[selectedRow]
-        selectedLotID = int(selectedLot["lotID"])
-        lotUnit = str(selectedLot["unit"])
-
-        availableQuantity = float(
-            selectedLot["availableQuantity"]
-        )
-
-        correctionConfirmed = True
-        correctionEffect = None
-
-        if movementType == "correction":
-            correctionEffect = st.radio(
-                "Correction effect",
-                ["Add stock", "Remove stock"],
-                horizontal=True,
-                key=f"correction_effect_{adjustmentVersion}"
-            )
-
-            correctionConfirmed = st.checkbox(
-                "I confirm that this correction has been approved",
-                key=f"correction_confirmed_{adjustmentVersion}"
-            )
-
-        enteredQuantity = st.number_input(
-            f"Quantity ({lotUnit})",
-            min_value=0.01,
-            value=0.01,
-            step=0.01,
-            key=f"adjustment_quantity_{adjustmentVersion}"
-        )
-
-        if movementType == "loss":
-            storedMovementType = "loss"
-            movementQuantity = enteredQuantity
-            quantityRemoved = enteredQuantity
-            reasonLabel = "Reason for the loss (optional)"
-
-        elif correctionEffect == "Add stock":
-            storedMovementType = "correction_added"
-            movementQuantity = enteredQuantity
-            quantityRemoved = 0
-            reasonLabel = "Reason for the approved correction"
-
-        else:
-            storedMovementType = "correction_removed"
-            movementQuantity = enteredQuantity
-            quantityRemoved = enteredQuantity
-            reasonLabel = "Reason for the approved correction"
-
-        reason = st.text_area(
-            reasonLabel,
-            key=f"adjustment_reason_{adjustmentVersion}"
-        )
-
-        submitted = st.button(
-            "Record stock movement",
-            key=f"record_adjustment_{adjustmentVersion}"
-        )
-        if submitted:
-            if reason.strip():
-                savedReason = reason.strip()
-            else:
-                savedReason = None
-
-            if (
-                movementType == "correction"
-                and not correctionConfirmed
-            ):
-                st.warning(
-                    "Confirm that the correction has been approved."
-                )
-
-            elif (
-                movementType == "correction"
-                and savedReason is None
-            ):
-                st.warning(
-                    "Enter the reason for the approved correction."
-                )
-
-            elif quantityRemoved > availableQuantity:
-                st.warning(
-                    f"Only {availableQuantity:,.2f} "
-                    f"{lotUnit} is currently available."
-                )
-
-            else:
-                recorded, adjustmentMessage = recordStockAdjustment(
-                    selectedLotID, storedMovementType, movementQuantity,
-                    lotUnit, savedReason, userID
-                )
-                if not recorded:
-                    st.warning(adjustmentMessage)
-
-                if recorded:
-                    logActivity(
-                        userID,
-                        "stock_movement_recorded",
-                        f"Recorded {storedMovementType} for lot {selectedLotID}"
-                    )
-
-                    if storedMovementType == "loss":
-                        message = (
-                            f"Loss recorded successfully. "
-                            f"{movementQuantity:,.2f} "
-                            f"{lotUnit} was removed from stock."
-                        )
-
-                    elif storedMovementType == "correction_added":
-                        message = (
-                            f"Approved correction recorded successfully. "
-                            f"{movementQuantity:,.2f} "
-                            f"{lotUnit} was added to stock."
-                        )
-
-                    else:
-                        message = (
-                            f"Approved correction recorded successfully. "
-                            f"{movementQuantity:,.2f} "
-                            f"{lotUnit} was removed from stock."
-                        )
-
-                    st.session_state.stockMovementMessage = message
-
-                    # New widget keys cause all adjustment inputs to reset.
-                    st.session_state.stockAdjustmentVersion += 1
-
-                    st.rerun()
+                showHarvestLotCards(lots, photos, withButtons, userID)
 
 
 def addHarvestLot(cycleID, quantity,unit, harvestDate,sellByDate,userID):
