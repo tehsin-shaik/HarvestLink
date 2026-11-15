@@ -1202,6 +1202,64 @@ def showStatCards(cards):
     st.markdown(f'<div class="hl-stats">{cardHtml}</div>', unsafe_allow_html=True)
 
 
+def produceImageData(lotIDs, cropName, cropImages):
+    if cropImages.empty:
+        return None
+
+    candidates = pd.concat([
+        cropImages[cropImages["lotID"].isin(lotIDs)],
+        cropImages[cropImages["cropName"] == cropName],
+    ])
+    for imageName in candidates["imageName"]:
+        data = showcaseImageData(imageName)
+        if data:
+            return data
+    return None
+
+
+def showProduceCards(cropTotals, lots, cropImages):
+    from html import escape
+
+    cards = []
+    for row in cropTotals.itertuples(index=False):
+        lotIDs = lots[(lots["cropName"] == row.cropName) & (lots["unit"] == row.unit)]["lotID"].tolist()
+        imageData = produceImageData(lotIDs, row.cropName, cropImages)
+        stock = float(row.stock)
+        reserved = float(row.reserved)
+        availablePercent = max(0, min(100, (float(row.availableNow) / stock * 100) if stock > 0 else 0))
+        reservedPercent = max(0, min(100 - availablePercent, (reserved / stock * 100) if stock > 0 else 0))
+
+        if imageData:
+            photo = f'<img src="data:image/jpeg;base64,{imageData}" alt="{escape(row.cropName)}">'
+        else:
+            photo = f'<span class="hl-produce-initial">{escape(row.cropName[:1])}</span>'
+
+        sellBy = pd.to_datetime(row.nextSellBy, errors="coerce")
+        if pd.isna(sellBy):
+            sellByTag = '<span class="hl-produce-tag">No sell-by date</span>'
+        else:
+            daysLeft = (sellBy.date() - date.today()).days
+            when = "today" if daysLeft <= 0 else "tomorrow" if daysLeft == 1 else f"in {daysLeft} days"
+            tone = " hl-produce-tag-warn" if daysLeft <= 7 else ""
+            sellByTag = f'<span class="hl-produce-tag{tone}">Sell by {when}</span>'
+
+        lotWord = "lot" if row.lots == 1 else "lots"
+        cards.append(
+            f'<article class="hl-produce"><div class="hl-produce-photo">{photo}{sellByTag}</div>'
+            f'<div class="hl-produce-body"><div class="hl-produce-head"><span class="hl-produce-name">{escape(row.cropName)}</span>'
+            f'<span class="hl-produce-meta">{row.lots} {lotWord} · {escape(str(row.unit))}</span></div>'
+            f'<div class="hl-produce-available"><b>{escape(formatQuantity(row.availableNow, row.unit))}</b> available</div>'
+            f'<div class="hl-produce-bar" title="Available vs reserved">'
+            f'<span class="hl-bar-available" style="width:{availablePercent:.1f}%"></span>'
+            f'<span class="hl-bar-reserved" style="width:{reservedPercent:.1f}%"></span></div>'
+            f'<div class="hl-produce-legend"><span><i class="hl-dot-available"></i>{escape(formatQuantity(row.availableNow, row.unit))} free</span>'
+            f'<span><i class="hl-dot-reserved"></i>{escape(formatQuantity(row.reserved, row.unit))} reserved</span></div>'
+            f'<div class="hl-produce-foot">{escape(formatQuantity(row.stock, row.unit))} in stock</div></div></article>'
+        )
+
+    st.markdown(f'<div class="hl-produce-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
 def goToPage(page):
     st.session_state["hl_nav_farmer"] = page
 
@@ -1320,18 +1378,17 @@ def showDashboard(current_user):
         st.subheader("Stock by crop")
         st.caption("Lots of the same crop and unit are added together.")
 
-        showTable(
-            pd.DataFrame({
-                "Crop": cropTotals["cropName"],
-                "Lots": cropTotals["lots"],
-                "In stock": [formatQuantity(q, u) for q, u in zip(cropTotals["stock"], cropTotals["unit"])],
-                "Reserved": [formatQuantity(q, u) for q, u in zip(cropTotals["reserved"], cropTotals["unit"])],
-                "Available": [formatQuantity(q, u) for q, u in zip(cropTotals["availableNow"], cropTotals["unit"])],
-                "Next sell-by": cropTotals["nextSellBy"],
-            }),
-            width="stretch",
-            hide_index=True
+        cropImages = selectData(
+            """SELECT hi.lotID, c.cropName, hi.imageName
+               FROM HarvestLotImages hi
+               JOIN HarvestLots hl ON hi.lotID = hl.lotID
+               JOIN CropCycle cc ON hl.cycleID = cc.cycleID
+               JOIN Crops c ON cc.cropID = c.cropID
+               LEFT JOIN OwnedBy o ON o.farmID = cc.farmID AND o.userID = %s
+               ORDER BY (o.userID IS NULL), hl.harvestDate DESC, hi.imageNumber""",
+            (current_user["userID"],)
         )
+        showProduceCards(cropTotals, available, cropImages)
 
         st.subheader("Harvested inventory")
 
