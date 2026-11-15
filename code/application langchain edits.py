@@ -1267,6 +1267,68 @@ def keepStockView():
     st.session_state["hl_stock_view_last"] = st.session_state["hl_stock_view"]
 
 
+def showNeedsAttention(expiringLots, openRequests):
+    from html import escape
+
+    def daysText(days):
+        return "Last day" if days <= 0 else "1 day left" if days == 1 else f"{days} days left"
+
+    expiringRows = "".join(
+        f'<li><span class="hl-attn-main"><b>{escape(str(lot.cropName))}</b> · Lot #{lot.lotID}'
+        f'<small>{escape(formatQuantity(lot.availableQuantity, lot.unit))} available · {escape(str(lot.farmName))}</small></span>'
+        f'<span class="hl-attn-pill hl-attn-pill-warn">{daysText(lot.daysLeft)}</span></li>'
+        for lot in expiringLots.head(4).itertuples(index=False)
+    )
+    requestRows = "".join(
+        f'<li><span class="hl-attn-main"><b>{escape(str(request.cropName))}</b> · {escape(formatQuantity(request.remaining, request.unit))} still needed'
+        f'<small>{escape(str(request.marketName))} · {escape(str(request.requestedBy))}</small></span>'
+        f'<span class="hl-attn-pill">Request #{request.requestID}</span></li>'
+        for request in openRequests.head(4).itertuples(index=False)
+    )
+
+    if not expiringRows and not requestRows:
+        st.markdown(
+            '<div class="hl-attn hl-attn-clear"><span class="hl-attn-title">All clear</span>'
+            '<p>Nothing is expiring this week and there are no open requests for your crops.</p></div>',
+            unsafe_allow_html=True
+        )
+        return
+
+    st.subheader("Needs attention")
+    with st.container(key="hl_attention"):
+        expiringCol, requestsCol = st.columns(2, gap="medium")
+
+        with expiringCol:
+            with st.container(key="hl_attn_expiring"):
+                st.markdown(
+                    f'<div class="hl-attn-head"><span class="hl-attn-title">Expiring this week</span>'
+                    f'<span class="hl-attn-count hl-attn-count-warn">{len(expiringLots)}</span></div>'
+                    + (f'<ul class="hl-attn-list">{expiringRows}</ul>' if expiringRows
+                       else '<p class="hl-attn-empty">No lots reach their sell-by date in the next 7 days.</p>'),
+                    unsafe_allow_html=True
+                )
+                if expiringRows:
+                    st.button(
+                        "Allocate before they expire", icon=":material/arrow_forward:", width="stretch",
+                        key="hl_attn_expiring_go", on_click=goToPage, args=("Requests and allocations",)
+                    )
+
+        with requestsCol:
+            with st.container(key="hl_attn_requests"):
+                st.markdown(
+                    f'<div class="hl-attn-head"><span class="hl-attn-title">Open requests for your crops</span>'
+                    f'<span class="hl-attn-count">{len(openRequests)}</span></div>'
+                    + (f'<ul class="hl-attn-list">{requestRows}</ul>' if requestRows
+                       else '<p class="hl-attn-empty">No open market requests for the crops you grow.</p>'),
+                    unsafe_allow_html=True
+                )
+                if requestRows:
+                    st.button(
+                        "Allocate stock to requests", icon=":material/arrow_forward:", width="stretch",
+                        key="hl_attn_requests_go", on_click=goToPage, args=("Requests and allocations",)
+                    )
+
+
 def goToPage(page):
     st.session_state["hl_nav_farmer"] = page
 
@@ -1320,14 +1382,22 @@ def showDashboard(current_user):
         (current_user["userID"],)
     )
     openRequests = selectData(
-        """SELECT COUNT(*) AS openRequests
-           FROM MarketRequests mr
-           WHERE mr.reqStatus IN ('pending', 'partiallyFulfilled') AND mr.cropID IN (
+        """SELECT mr.requestID, CONCAT(u.fname, ' ', u.lname) AS requestedBy, m.marketName, c.cropName, mr.unit, mr.requestDate
+           FROM MarketRequests mr, Users u, Markets m, Crops c
+           WHERE mr.userID = u.userID AND mr.marketID = m.marketID AND mr.cropID = c.cropID
+             AND mr.reqStatus IN ('pending', 'partiallyFulfilled') AND mr.cropID IN (
                SELECT cc.cropID FROM CropCycle cc, OwnedBy o
-               WHERE cc.farmID = o.farmID AND o.userID = %s AND cc.status = 1)""",
+               WHERE cc.farmID = o.farmID AND o.userID = %s AND cc.status = 1)
+           ORDER BY mr.requestDate""",
         (current_user["userID"],)
     )
-    openRequestCount = 0 if openRequests.empty else int(openRequests.iloc[0]["openRequests"])
+    if not openRequests.empty:
+        openRequests["remaining"] = [
+            (calculateRequestProgress(int(requestID)) or {}).get("remainingQuantity", 0)
+            for requestID in openRequests["requestID"]
+        ]
+        openRequests = openRequests[openRequests["remaining"] > 0]
+    openRequestCount = len(openRequests)
 
     if available.empty:
         available = pd.DataFrame(columns=[
@@ -1364,6 +1434,10 @@ def showDashboard(current_user):
         ("Expiring this week", expiringSoon, "Sell-by date in the next 7 days", "warn" if expiringSoon else "sand", "clock"),
         ("Upcoming harvests", upcomingHarvests, "Expected in the next 7 days", "leaf", "sprout"),
     ])
+
+    expiringLots = available[(sellBy >= date.today()) & (sellBy <= date.today() + timedelta(days=7))].copy()
+    expiringLots["daysLeft"] = [(day - date.today()).days for day in sellBy[expiringLots.index]]
+    showNeedsAttention(expiringLots.sort_values("daysLeft"), openRequests)
 
     if available.empty:
         st.info("No harvested lots are available yet.")

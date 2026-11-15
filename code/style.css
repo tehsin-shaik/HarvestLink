@@ -97,6 +97,24 @@ h1, h2, h3, .hl-logo { font-variant-numeric: lining-nums; }
 .hl-account-card { display:flex; align-items:center; gap:12px; padding-bottom:12px; margin-bottom:6px; border-bottom:1px solid var(--hl-line); }
 
 /* Dashboard stat cards */
+.st-key-hl_attn_expiring, .st-key-hl_attn_requests { background:#fff; border:1px solid var(--hl-line); border-radius:18px; padding:18px 20px; height:100%; }
+.st-key-hl_attn_expiring { border-left:4px solid #d08a3c; }
+.st-key-hl_attn_requests { border-left:4px solid var(--hl-green); }
+.st-key-hl_attention { margin-bottom:26px; }
+.hl-attn-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px; }
+.hl-attn-title { font-family:var(--hl-serif); font-size:22px; font-weight:600; color:var(--hl-ink); }
+.hl-attn-count { min-width:28px; height:28px; padding:0 8px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; font-size:13px; font-weight:600; background:var(--hl-sand); color:var(--hl-green); }
+.hl-attn-count-warn { background:#fbecd8; color:#9a5a17; }
+ul.hl-attn-list { list-style:none; margin:0; padding:0; }
+ul.hl-attn-list li { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0; padding:10px 0; border-bottom:1px solid #eef1e8; }
+ul.hl-attn-list li:last-child { border-bottom:none; }
+.hl-attn-main { font-size:14px; color:var(--hl-ink); }
+.hl-attn-main small { display:block; margin-top:2px; font-size:12.5px; color:var(--hl-muted); }
+.hl-attn-pill { flex:0 0 auto; font-size:12px; font-weight:600; padding:4px 10px; border-radius:999px; background:var(--hl-sand); color:var(--hl-green-dark); white-space:nowrap; }
+.hl-attn-pill-warn { background:#fbecd8; color:#9a5a17; }
+.hl-attn-empty { color:var(--hl-muted); font-size:14px; margin:6px 0 0; }
+.hl-attn-clear { background:#fff; border:1px solid var(--hl-line); border-left:4px solid var(--hl-green); border-radius:18px; padding:18px 20px; margin:0 0 26px; }
+.hl-attn-clear p { margin:4px 0 0; color:var(--hl-muted); }
 .st-key-hl_stock_view { margin-bottom:10px; margin-left:auto; width:fit-content !important; }
 .st-key-hl_stock_view [data-testid="stButtonGroup"] { width:fit-content; margin-left:auto; }
 .hl-produce-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:16px; margin:6px 0 28px; }
