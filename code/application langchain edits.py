@@ -1179,14 +1179,25 @@ def formatQuantity(quantity, unit):
     return f"{float(quantity):,.2f}".rstrip("0").rstrip(".") + f" {unit}"
 
 
+STAT_ICONS = {
+    "basket": '<path d="M4 10h16l-1.6 9.2a2 2 0 0 1-2 1.8H7.6a2 2 0 0 1-2-1.8L4 10zM8 10l4-6 4 6"/>',
+    "bookmark": '<path d="M7 3h10a1 1 0 0 1 1 1v17l-6-4-6 4V4a1 1 0 0 1 1-1z"/>',
+    "inbox": '<path d="M3 13l3-8h12l3 8v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6zM3 13h5l1.5 3h5L16 13h5"/>',
+    "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "sprout": '<path d="M12 21v-9M12 12c0-4 3-7 8-7 0 5-3 8-8 7zM12 14c0-3-2.5-5.5-7-5.5 0 4 2.5 6.5 7 5.5z"/>',
+}
+
+
 def showStatCards(cards):
     from html import escape
 
     cardHtml = "".join(
-        f'<div class="hl-stat hl-stat-{tone}"><span class="hl-stat-label">{escape(label)}</span>'
+        f'<div class="hl-stat hl-stat-{tone}"><div class="hl-stat-top"><span class="hl-stat-label">{escape(label)}</span>'
+        f'<span class="hl-stat-icon"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" '
+        f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{STAT_ICONS.get(icon, "")}</svg></span></div>'
         f'<span class="hl-stat-value">{escape(str(value))}</span>'
         f'<span class="hl-stat-note">{escape(note)}</span></div>'
-        for label, value, note, tone in cards
+        for label, value, note, tone, icon in cards
     )
     st.markdown(f'<div class="hl-stats">{cardHtml}</div>', unsafe_allow_html=True)
 
@@ -1238,31 +1249,20 @@ def showDashboard(current_user):
         available.at[index, "availableQuantity"] = float(availableQuantity)
 
     inStock = available[available["availableQuantity"] > 0].copy()
-    reservedByUnit = (
-        available[available["reservedQuantity"] > 0]
-        .groupby("unit")["reservedQuantity"].sum()
-        .sort_values(ascending=False)
-    )
-    if reservedByUnit.empty:
-        mainUnit = available["unit"].mode().iloc[0] if not available.empty else ""
-        reservedValue = formatQuantity(0, mainUnit).strip()
-        reservedNote = "Nothing is reserved yet"
-    else:
-        reservedValue = formatQuantity(reservedByUnit.iloc[0], reservedByUnit.index[0])
-        extraUnits = len(reservedByUnit) - 1
-        reservedNote = (
-            f"Plus amounts in {extraUnits} other unit{'s' if extraUnits > 1 else ''}"
-            if extraUnits else "Held for market requests"
-        )
+    reservedLots = int((available["reservedQuantity"] > 0).sum())
+
+    expectedDates = pd.to_datetime(expected["expectedHarvestDate"], errors="coerce").dt.date if not expected.empty else pd.Series(dtype=object)
+    upcomingHarvests = int(((expectedDates >= date.today()) & (expectedDates <= date.today() + timedelta(days=7))).sum())
 
     sellBy = pd.to_datetime(available["sellByDate"], errors="coerce").dt.date
     expiringSoon = int(((sellBy >= date.today()) & (sellBy <= date.today() + timedelta(days=7))).sum())
 
     showStatCards([
-        ("Available lots", len(inStock), f"{len(available)} harvest lots on record", "green"),
-        ("Reserved stock", reservedValue, reservedNote, "leaf"),
-        ("Open market requests", openRequestCount, "For crops you grow", "sand"),
-        ("Expiring this week", expiringSoon, "Sell-by date in the next 7 days", "warn" if expiringSoon else "sand"),
+        ("Available lots", len(inStock), "Stock left to allocate", "green", "basket"),
+        ("Reserved lots", reservedLots, "Holding stock for market requests", "leaf", "bookmark"),
+        ("Open market requests", openRequestCount, "For crops you grow", "sand", "inbox"),
+        ("Expiring this week", expiringSoon, "Sell-by date in the next 7 days", "warn" if expiringSoon else "sand", "clock"),
+        ("Upcoming harvests", upcomingHarvests, "Expected in the next 7 days", "leaf", "sprout"),
     ])
 
     if available.empty:
