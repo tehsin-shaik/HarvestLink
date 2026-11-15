@@ -387,3 +387,95 @@ h1.hl-welcome-title em { font-style:italic; color:var(--hl-green); }
 }
 
 [data-testid="stBottomBlockContainer"] { background:var(--hl-cream); }
+
+/* FittonAI floating launcher */
+.st-key-fitton_launcher {
+    position:fixed;
+    right:28px;
+    bottom:28px;
+    z-index:1000;
+    width:auto !important;
+}
+
+.st-key-fitton_launcher button {
+    width:60px;
+    height:60px;
+    min-height:0;
+    padding:0;
+    border:none;
+    border-radius:50%;
+    background:var(--hl-green) url('data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"%3E%3Cpath d="M12 2.6C17.6 5.1 20.1 9.6 19.1 14.6c-.9 4.3-4.2 6.7-7.1 6.9-2.9-.2-6.2-2.6-7.1-6.9C3.9 9.6 6.4 5.1 12 2.6z" fill="%239cc46a"/%3E%3Cpath d="M12 5.2V21M12 9 8.3 6.9M12 9l3.7-2.1M12 12.6 6.6 10M12 12.6l5.4-2.6M12 16.2l-5.3-2M12 16.2l5.3-2M8.3 6.9 6.6 10l.1 4.2M15.7 6.9l1.7 3.1-.1 4.2M9.4 11.4l.1 3.6M14.6 11.4l-.1 3.6" fill="none" stroke="%23f5f3ea" stroke-width="1.05" stroke-linecap="round" stroke-linejoin="round"/%3E%3C/svg%3E') center / 34px no-repeat;
+    box-shadow:0 12px 28px rgba(29,68,48,.30);
+    transition:transform .15s ease, background-color .15s ease;
+}
+
+.st-key-fitton_launcher button:hover,
+.st-key-fitton_launcher button:focus-visible {
+    background-color:var(--hl-green-dark);
+    transform:translateY(-2px);
+}
+
+.st-key-fitton_launcher button > * { display:none; }
+.st-key-fitton_launcher button[aria-expanded="true"] { background-color:var(--hl-green-dark); opacity:1; }
+
+[data-testid="stPopoverBody"]:has(.st-key-fitton_mini_panel) {
+    width:410px;
+    max-width:calc(100vw - 32px);
+    padding:16px 16px 12px;
+    border-radius:20px;
+    border:1px solid var(--hl-line);
+    background:var(--hl-cream);
+    box-shadow:0 24px 60px rgba(29,68,48,.22);
+}
+
+.hl-fitton-mini-head { display:flex; align-items:center; gap:10px; }
+.hl-fitton-mini-head .hl-fitton-logo { width:36px; height:36px; border-radius:11px; }
+.hl-fitton-mini-head strong {
+    display:block;
+    font-family:var(--hl-serif);
+    font-size:22px;
+    font-weight:600;
+    line-height:1;
+    color:var(--hl-ink);
+}
+.hl-fitton-mini-head span:not(.hl-fitton-logo) { font-size:12px; color:var(--hl-muted); }
+
+.st-key-fitton_mini_thread {
+    border:1px solid var(--hl-line);
+    border-radius:16px;
+    background:#fbfaf5;
+}
+
+.st-key-fitton_mini_thread [data-testid="stChatMessageContent"] { max-width:100% !important; }
+
+.hl-fitton-mini-welcome { text-align:center; padding:18px 6px 6px; }
+.hl-fitton-mini-welcome h3 {
+    font-family:var(--hl-serif);
+    font-size:24px;
+    font-weight:600;
+    color:var(--hl-ink);
+    margin:0 0 4px;
+    padding:0;
+}
+.hl-fitton-mini-welcome p { color:var(--hl-muted); font-size:13px; margin:0; }
+
+.st-key-fitton_mini_chips { gap:8px; padding:0 8px 8px; }
+.st-key-fitton_mini_chips button {
+    width:100%;
+    border-radius:999px;
+    border:1px solid var(--hl-line);
+    background:#fff;
+    color:var(--hl-green-dark);
+    font-size:13px;
+    min-height:0;
+    padding:7px 14px;
+}
+.st-key-fitton_mini_chips button:hover {
+    border-color:var(--hl-green);
+    background:var(--hl-sand);
+}
+
+@media (max-width:640px) {
+    .st-key-fitton_launcher { right:16px; bottom:16px; }
+    .st-key-fitton_launcher button { width:52px; height:52px; background-size:30px; }
+}

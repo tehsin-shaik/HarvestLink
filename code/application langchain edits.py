@@ -6446,6 +6446,110 @@ def askFitton(question):
     st.session_state["fitton_pending"] = question
 
 
+def showFittonThread(history, current_user, prefix):
+    from html import escape
+
+    for index, message in enumerate(history):
+        showFittonMessage(message, f"{prefix}_msg_{index}")
+
+        answered = index + 1 < len(history) and history[index + 1]["role"] == "assistant"
+        if message["role"] != "user" or answered:
+            continue
+
+        with st.chat_message("assistant", avatar=FITTON_AVATAR):
+            progress = st.empty()
+
+            def showStep(label):
+                progress.markdown(
+                    f'<div class="hl-fitton-thinking"><span class="hl-fitton-dots">'
+                    f'<i></i><i></i><i></i></span>{escape(label)}…</div>',
+                    unsafe_allow_html=True
+                )
+
+            showStep("Checking your question")
+            reply = answerFittonQuestion(message["text"], current_user, showStep)
+            progress.empty()
+
+        history.insert(index + 1, reply)
+        st.rerun()
+
+
+def openFittonPage(role):
+    st.session_state[f"hl_nav_{role}"] = "Assistant"
+
+
+def showFittonLauncher(current_user):
+    from html import escape
+
+    history = st.session_state.setdefault("fitton_chat", [])
+
+    with st.container(key="fitton_launcher"):
+        launcher = st.popover(
+            "FittonAI",
+            help="Ask FittonAI",
+            key="fitton_popover",
+            on_change="rerun"
+        )
+
+    if not launcher.open:
+        return
+
+    with launcher, st.container(key="fitton_mini_panel"):
+        with st.container(horizontal=True, vertical_alignment="center", gap="small", key="fitton_mini_top"):
+            st.markdown(
+                f'<div class="hl-fitton-mini-head"><span class="hl-fitton-logo">{fittonIcon(22)}</span>'
+                '<div><strong>FittonAI</strong><span>Read-only · your records only</span></div></div>',
+                unsafe_allow_html=True,
+                width="stretch"
+            )
+            if history:
+                st.button(
+                    "",
+                    icon=":material/add_comment:",
+                    help="New chat",
+                    key="fitton_mini_new",
+                    type="tertiary",
+                    on_click=history.clear
+                )
+            st.button(
+                "",
+                icon=":material/open_in_full:",
+                help="Open the full FittonAI page",
+                key="fitton_mini_full",
+                type="tertiary",
+                on_click=openFittonPage,
+                args=(current_user["role"],)
+            )
+
+        thread = st.container(height=380, key="fitton_mini_thread")
+        question = st.chat_input("Ask FittonAI a question", key="fitton_mini_input")
+        question = question or st.session_state.pop("fitton_pending", None)
+
+        if question:
+            history.append({"role": "user", "text": question})
+
+        with thread:
+            if history:
+                showFittonThread(history, current_user, "fitton_mini")
+                return
+
+            firstName = str(current_user.get("fname") or current_user["fullname"]).split()[0]
+            st.markdown(
+                f'<div class="hl-fitton-mini-welcome"><h3>Hi {escape(firstName)}, ask me anything</h3>'
+                '<p>About your crops, stock, requests or deliveries.</p></div>',
+                unsafe_allow_html=True
+            )
+            suggestions = FITTON_SUGGESTIONS.get(current_user["role"], FITTON_SUGGESTIONS["user"])
+            with st.container(key="fitton_mini_chips"):
+                for index, suggestion in enumerate(suggestions[:4]):
+                    st.button(
+                        suggestion,
+                        key=f"fitton_mini_chip_{index}",
+                        on_click=askFitton,
+                        args=(suggestion,)
+                    )
+
+
 def showAssistant(current_user):
     from html import escape
 
@@ -6500,29 +6604,7 @@ def showAssistant(current_user):
                 )
         return
 
-    for index, message in enumerate(history):
-        showFittonMessage(message, f"fitton_msg_{index}")
-
-        answered = index + 1 < len(history) and history[index + 1]["role"] == "assistant"
-        if message["role"] != "user" or answered:
-            continue
-
-        with st.chat_message("assistant", avatar=FITTON_AVATAR):
-            progress = st.empty()
-
-            def showStep(label):
-                progress.markdown(
-                    f'<div class="hl-fitton-thinking"><span class="hl-fitton-dots">'
-                    f'<i></i><i></i><i></i></span>{escape(label)}…</div>',
-                    unsafe_allow_html=True
-                )
-
-            showStep("Checking your question")
-            reply = answerFittonQuestion(message["text"], current_user, showStep)
-            progress.empty()
-
-        history.insert(index + 1, reply)
-        st.rerun()
+    showFittonThread(history, current_user, "fitton")
 
 
 # -----------------------------------------------------------------------------
@@ -6703,6 +6785,9 @@ def main():
 
     elif page == "Assistant":
         showAssistant(currentUser)
+
+    if page != "Assistant":
+        showFittonLauncher(currentUser)
 
 
 if __name__ == "__main__":
