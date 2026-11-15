@@ -1665,6 +1665,61 @@ def createProduceRequest(
         if connection:
             connection.close()
 
+def shopSellByTag(sellByDate):
+    sellBy = pd.to_datetime(sellByDate, errors="coerce")
+    if pd.isna(sellBy):
+        return '<span class="hl-produce-tag">No sell-by date</span>'
+    daysLeft = (sellBy.date() - date.today()).days
+    left = "last day" if daysLeft <= 0 else "1 day left" if daysLeft == 1 else f"{daysLeft} days left"
+    tone = " hl-produce-tag-warn" if daysLeft <= 7 else ""
+    return f'<span class="hl-produce-tag{tone}">Sell by {sellBy.day} {sellBy.strftime("%b")} · {left}</span>'
+
+
+@st.cache_data(show_spinner=False)
+def shopPhotoData(imageName):
+    import base64
+    from io import BytesIO
+    from PIL import ImageOps
+
+    imagePath = resolveHarvestImagePath(imageName)
+    if imagePath is None:
+        return None
+    try:
+        with Image.open(imagePath) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image = ImageOps.fit(image, (960, 720))
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=85)
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception as error:
+        print(f"Listing image failed ({imageName!r}): {error!r}")
+        return None
+
+
+def shopCardHtml(lot, imageName):
+    from html import escape
+
+    crop = escape(str(lot.cropName))
+    imageData = showcaseImageData(imageName) if imageName else None
+    if imageData:
+        photo = f'<img src="data:image/jpeg;base64,{imageData}" alt="{crop}">'
+    else:
+        photo = f'<span class="hl-produce-initial">{escape(str(lot.cropName)[:1])}</span>'
+
+    sellByTag = shopSellByTag(lot.sellByDate)
+    harvested = readableDate(lot.harvestDate) or "date not set"
+    icon = '<span class="material-symbols-rounded" aria-hidden="true">{}</span>'
+    return (
+        f'<article class="hl-produce hl-shop"><div class="hl-produce-photo">{photo}{sellByTag}</div>'
+        f'<div class="hl-produce-body"><div class="hl-produce-head"><span class="hl-produce-name">{crop}</span>'
+        f'<span class="hl-produce-meta">Lot #{int(lot.lotID)}</span></div>'
+        f'<div class="hl-produce-available"><b>{escape(formatQuantity(lot.availableQuantity, lot.unit))}</b> available</div>'
+        f'<div class="hl-shop-foot"><span>{icon.format("agriculture")}{escape(str(lot.farmName))}</span>'
+        f'<span>{icon.format("location_on")}{escape(str(lot.location))}</span>'
+        f'<span>{icon.format("calendar_today")}Harvested {harvested}</span></div></div></article>'
+    )
+
+
 def showProduceSearch(current_user):
     st.header("Local produce marketplace")
 
@@ -1706,29 +1761,37 @@ def showProduceSearch(current_user):
 
     # Show the filters only while viewing the listing page.
     if st.session_state.selectedProduceLot is None:
-        col1, col2, col3 = st.columns(3)
-        col4, col5, col6 = st.columns(3)
+        with st.container(
+            horizontal=True,
+            vertical_alignment="center",
+            gap="small",
+            key="shop_filters"
+        ):
+            selectedCrop = st.pills(
+                "Crop",
+                cropNames,
+                default="All",
+                key="shop_crop",
+                label_visibility="collapsed"
+            ) or "All"
 
-        selectedCrop = col1.selectbox("Crop", cropNames)
-        selectedFarm = col2.selectbox("Farm", farmNames)
-        location = col3.text_input("Location or emirate")
+            with st.popover("More filters", icon=":material/tune:"):
+                selectedFarm = st.selectbox("Farm", farmNames, key="shop_farm")
+                location = st.text_input("Location or emirate", key="shop_location")
+                selectedUnit = st.selectbox("Unit", ["All"] + units, key="shop_unit")
 
-        selectedUnit = col4.selectbox(
-            "Unit",
-            ["All"] + units
-        )
-
-        # Pick the day the buyer wants the produce to be available.
-        availableOn = col5.date_input(
-            "Available on",
-            value=date.today(),
-            min_value=date.today()
-        )
-
-        minimumQuantity = col6.number_input(
-            "Minimum available",
-            min_value=0.0
-        )
+                # Pick the day the buyer wants the produce to be available.
+                availableOn = st.date_input(
+                    "Available on",
+                    value=date.today(),
+                    min_value=date.today(),
+                    key="shop_date"
+                )
+                minimumQuantity = st.number_input(
+                    "Minimum available",
+                    min_value=0.0,
+                    key="shop_min"
+                )
 
         produceQuery = """SELECT hl.lotID, cc.cropID, f.farmName, f.location, c.cropName, hl.quantityHarvested, hl.unit, hl.harvestDate, hl.sellByDate
                         FROM HarvestLots hl, CropCycle cc, Farms f, Crops c
@@ -1786,72 +1849,77 @@ def showProduceSearch(current_user):
 
             available = available[ available["availableQuantity"] > 0]
 
+        filterNotes = []
+        if selectedFarm != "All":
+            filterNotes.append(selectedFarm)
+        if location.strip():
+            filterNotes.append(f'"{location.strip()}"')
+        if selectedUnit != "All":
+            filterNotes.append(f"in {selectedUnit}")
+        if availableOn != date.today():
+            filterNotes.append(f"available on {readableDate(availableOn)}")
+        if minimumQuantity > 0:
+            filterNotes.append(f"at least {minimumQuantity:,g} available")
+
         if available.empty:
-            st.info("No produce matched the selected filters.")
+            st.markdown(
+                '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+                'search_off</span><span>No produce matched these filters. Try another crop or '
+                'change More filters.</span></div>',
+                unsafe_allow_html=True
+            )
             return
 
-        st.subheader(f"{len(available)} produce listings")
+        listingWord = "listing" if len(available) == 1 else "listings"
+        st.subheader(f"{len(available)} {listingWord} available", anchor=False)
+        if filterNotes:
+            st.caption("Filtered by " + " · ".join(filterNotes))
 
-        cardsPerRow = 3
+        lotIDs = [int(lotID) for lotID in available["lotID"]]
+        photos = selectData(
+            f"""SELECT lotID, imageName FROM HarvestLotImages
+                WHERE lotID IN ({", ".join(["%s"] * len(lotIDs))})
+                ORDER BY lotID, imageNumber""",
+            tuple(lotIDs),
+            show_error=False
+        )
+        firstPhoto = {} if photos.empty else {
+            int(lotID): imageName
+            for lotID, imageName in photos.groupby("lotID")["imageName"].first().items()
+        }
 
-        for start in range(0, len(available), cardsPerRow):
-            columns = st.columns(cardsPerRow)
-            rows = available.iloc[start:start + cardsPerRow]
-
-            for columnNumber, (_, lot) in enumerate(rows.iterrows()):
-                with columns[columnNumber]:
-                    with st.container(border=True):
-                        imageData = selectData(
-                            """SELECT imageName
-                               FROM HarvestLotImages
-                               WHERE lotID = %s
-                               ORDER BY imageNumber
-                               LIMIT 1""",
-                            (int(lot["lotID"]),)
-                        )
-
-                        if not imageData.empty:
-                            imageName = str(
-                                imageData.iloc[0]["imageName"]
-                            )
-                            showHarvestImageFile(
-                                imageName,
-                                compact=True,
-                                use_container_width=True
-                            )
-                        else:
-                            st.caption("No image uploaded.")
-
-                        st.subheader(lot["cropName"])
-                        st.write(f"**Farm:** {lot['farmName']}")
-                        st.write(f"**Location:** {lot['location']}")
-
-                        st.write(
-                            f"**Available:** "
-                            f"{float(lot['availableQuantity']):,.2f} "
-                            f"{lot['unit']}"
-                        )
-
-                        st.caption(
-                            f"Harvested: {lot['harvestDate']}  \n"
-                            f"Sell by: {lot['sellByDate']}"
-                        )
-
-                        if st.button(
-                            "View listing",
-                            key=f"view_listing_{lot['lotID']}",
-                            use_container_width=True
-                        ):
-                            st.session_state.selectedProduceLot = int(
-                                lot["lotID"]
-                            )
-                            st.rerun()
+        lots = list(available.itertuples(index=False))
+        for start in range(0, len(lots), 3):
+            columns = st.columns(3)
+            for column, lot in zip(columns, lots[start:start + 3]):
+                lotID = int(lot.lotID)
+                with column, st.container(key=f"shop_card_{lotID}"):
+                    st.markdown(
+                        shopCardHtml(lot, firstPhoto.get(lotID)),
+                        unsafe_allow_html=True
+                    )
+                    if st.button(
+                        "View & request",
+                        key=f"view_listing_{lotID}",
+                        type="primary",
+                        icon=":material/arrow_forward:",
+                        width="stretch"
+                    ):
+                        st.session_state.selectedProduceLot = lotID
+                        st.rerun()
 
     # Display the selected listing.
     else:
+        from html import escape
+
         selectedLotID = st.session_state.selectedProduceLot
 
-        if st.button("← Back to listings"):
+        if st.button(
+            "Back to listings",
+            key="shop_back",
+            type="tertiary",
+            icon=":material/arrow_back:"
+        ):
             st.session_state.selectedProduceLot = None
             st.rerun()
 
@@ -1869,114 +1937,159 @@ def showProduceSearch(current_user):
         stockOnHand, reservedQuantity, availableQuantity = (
             calculateLotAvailability(selectedLotID)
         )
+        available = float(availableQuantity or 0)
+        unit = str(lot["unit"])
+        crop = str(lot["cropName"])
+        icon = '<span class="material-symbols-rounded" aria-hidden="true">{}</span>'
 
-        imageColumn, detailColumn = st.columns([1.2, 1])
+        images = selectData(
+            """SELECT imageNumber, imageName
+               FROM HarvestLotImages
+               WHERE lotID = %s
+               ORDER BY imageNumber""",
+            (selectedLotID,)
+        )
+        imageNames = [] if images.empty else images["imageName"].tolist()
+
+        imageColumn, detailColumn = st.columns([1.15, 1], gap="large")
 
         with imageColumn:
-            images = selectData(
-                """SELECT imageNumber, imageName
-                   FROM HarvestLotImages
-                   WHERE lotID = %s
-                   ORDER BY imageNumber""",
-                (selectedLotID,)
+            photoKey = f"shop_photo_{selectedLotID}"
+            photoIndex = st.session_state.get(photoKey) or 0
+            photoIndex = min(photoIndex, max(len(imageNames) - 1, 0))
+            imageData = shopPhotoData(imageNames[photoIndex]) if imageNames else None
+
+            if imageData:
+                photo = f'<img src="data:image/jpeg;base64,{imageData}" alt="{escape(crop)}">'
+            else:
+                photo = (
+                    f'<span class="hl-produce-initial">{escape(crop[:1])}</span>'
+                    '<span class="hl-listing-nophoto">No photos of this lot yet</span>'
+                )
+
+            st.markdown(
+                f'<div class="hl-listing-photo">{photo}{shopSellByTag(lot["sellByDate"])}</div>',
+                unsafe_allow_html=True
             )
 
-            if images.empty:
-                st.info("No images uploaded for this lot.")
-
-            else:
-                for _, image in images.iterrows():
-                    showHarvestImageFile(
-                        image["imageName"],
-                        caption=f"{lot['cropName']} — Lot {selectedLotID}",
-                        use_container_width=True
-                    )
+            if len(imageNames) > 1:
+                st.segmented_control(
+                    "Photo",
+                    list(range(len(imageNames))),
+                    format_func=lambda index: f"Photo {index + 1}",
+                    default=0,
+                    key=photoKey,
+                    label_visibility="collapsed"
+                )
 
         with detailColumn:
-            st.title(lot["cropName"])
-            st.write(f"### {lot['farmName']}")
-            st.write(f"📍 {lot['location']}")
-
-            st.metric(
-                "Available quantity",
-                f"{float(availableQuantity):,.2f} {lot['unit']}"
+            facts = [
+                ("agriculture", "Farm", lot["farmName"]),
+                ("location_on", "Location", lot["location"]),
+                ("calendar_today", "Harvested", readableDate(lot["harvestDate"]) or "Not set"),
+                ("event_busy", "Sell by", readableDate(lot["sellByDate"]) or "No sell-by date"),
+            ]
+            factHtml = "".join(
+                f'<div class="hl-listing-fact">{icon.format(name)}<span><small>{label}</small>{escape(str(value))}</span></div>'
+                for name, label, value in facts
+            )
+            st.markdown(
+                f'<div class="hl-listing-head"><span class="hl-eyebrow">Fresh from {escape(str(lot["farmName"]))}</span>'
+                f'<h1>{escape(crop)}</h1><span class="hl-listing-sub">Lot #{int(selectedLotID)}</span>'
+                f'<div class="hl-listing-stock"><b>{escape(formatQuantity(available, unit))}</b> available now</div>'
+                f'<div class="hl-listing-facts">{factHtml}</div></div>',
+                unsafe_allow_html=True
             )
 
-            st.write(f"**Lot number:** {selectedLotID}")
-            st.write(f"**Harvest date:** {lot['harvestDate']}")
-            st.write(f"**Sell-by date:** {lot['sellByDate']}")
-
-            st.divider()
-            st.subheader(f"Request {lot['cropName']}")
-
-            markets = selectData(
-                """SELECT marketID, marketName, location
-                   FROM Markets
-                   WHERE isActive = 1
-                   ORDER BY marketName"""
-            )
-
-            if markets.empty:
-                st.warning("No markets are available.")
-                return
-
-            marketOptions = {}
-
-            for _, market in markets.iterrows():
-                label = (
-                    f"{market['marketName']} — "
-                    f"{market['location']}"
-                )
-                marketOptions[label] = int(market["marketID"])
-
-            with st.form("produce_request_form"):
-                selectedMarket = st.selectbox(
-                    "Delivery market",
-                    list(marketOptions.keys())
+            with st.container(key="shop_request_panel"):
+                st.markdown(
+                    f'<div class="hl-listing-panel-head"><strong>Request {escape(crop.lower())}</strong>'
+                    f'<span>Sold in {escape(unit)}. Any farm with {escape(crop.lower())} in {escape(unit)} can fill your request.</span></div>',
+                    unsafe_allow_html=True
                 )
 
-                requestedQuantity = st.number_input(f"Quantity requested ({lot['unit']})",min_value=0.01, value=1.0)
+                if available < 0.01:
+                    st.info("This lot is fully reserved right now. Check back later or pick another listing.")
+                    return
 
-                st.text_input(
-                    "Unit",
-                    value=str(lot["unit"]),
-                    disabled=True
+                markets = selectData(
+                    """SELECT marketID, marketName, location
+                       FROM Markets
+                       WHERE isActive = 1
+                       ORDER BY marketName"""
                 )
 
-                submitted = st.form_submit_button(
-                    "Submit request",
-                    use_container_width=True
-                )
+                if markets.empty:
+                    st.warning("No markets are available.")
+                    return
 
-            if submitted:
-                # Recalculate in case availability changed while
-                # the buyer was viewing the page.
-                _, _, latestAvailability = calculateLotAvailability(
-                    selectedLotID
-                )
+                marketOptions = {}
 
-                if latestAvailability is None:
-                    st.warning("Availability could not be checked. Please try again.")
+                for _, market in markets.iterrows():
+                    label = (
+                        f"{market['marketName']} · "
+                        f"{market['location']}"
+                    )
+                    marketOptions[label] = int(market["marketID"])
 
-                elif requestedQuantity > float(latestAvailability):
-                    st.warning(
-                        "The available quantity has changed. "
-                        "Please enter a smaller quantity."
+                with st.form("produce_request_form", border=False):
+                    selectedMarket = st.selectbox(
+                        "Deliver to",
+                        list(marketOptions.keys())
                     )
 
-                else:
-                    created, message = createProduceRequest(
-                        current_user=current_user,
-                        cropID=int(lot["cropID"]),
-                        marketID=marketOptions[selectedMarket],
-                        quantity=requestedQuantity,
-                        unit=str(lot["unit"])
+                    requestedQuantity = st.number_input(
+                        f"Amount ({unit})",
+                        min_value=0.01,
+                        max_value=available,
+                        value=min(1.0, available),
+                        help=f"Up to {formatQuantity(available, unit)} is available from this lot."
                     )
 
-                    if created:
-                        st.success(message)
+                    submitted = st.form_submit_button(
+                        "Send request",
+                        type="primary",
+                        icon=":material/shopping_basket:",
+                        width="stretch"
+                    )
+
+                if submitted:
+                    # Recalculate in case availability changed while
+                    # the buyer was viewing the page.
+                    _, _, latestAvailability = calculateLotAvailability(
+                        selectedLotID
+                    )
+
+                    if latestAvailability is None:
+                        st.warning("Availability could not be checked. Please try again.")
+
+                    elif requestedQuantity > float(latestAvailability):
+                        st.warning(
+                            "The available quantity has changed. "
+                            "Please enter a smaller quantity."
+                        )
+
                     else:
-                        st.error(message)
+                        created, message = createProduceRequest(
+                            current_user=current_user,
+                            cropID=int(lot["cropID"]),
+                            marketID=marketOptions[selectedMarket],
+                            quantity=requestedQuantity,
+                            unit=unit
+                        )
+
+                        if created:
+                            st.success(message)
+                            st.button(
+                                "See my requests",
+                                key="shop_go_requests",
+                                icon=":material/arrow_forward:",
+                                on_click=lambda: st.session_state.update(
+                                    {"hl_nav_user": "My requests", "selectedProduceLot": None}
+                                )
+                            )
+                        else:
+                            st.error(message)
 def resolveHarvestImagePath(imageName):
     """Find an image referenced by MySQL in the supported local image folders."""
     imageName = str(imageName).strip()
@@ -3244,7 +3357,7 @@ def showHarvestLotMenu(lot, userID):
         )
 
 
-@st.dialog("Record a loss or correction")
+@st.dialog("Record a loss or correction", width="medium")
 def lotAdjustmentDialog(lot, userID):
     adjustmentVersion = st.session_state.stockAdjustmentVersion
     selectedLotID = int(lot.lotID)
@@ -3313,6 +3426,7 @@ def lotAdjustmentDialog(lot, userID):
     submitted = st.button(
         "Record stock movement",
         type="primary",
+        icon=":material/check:",
         width="stretch",
         key=f"record_adjustment_{keySuffix}"
     )
@@ -4782,6 +4896,199 @@ def cancelReservedQuantity(allocationID, cancellationQuantity, reason, userID):
 # User pages
 # -----------------------------------------------------------------------------
 
+REQUEST_STATUS_LABELS = {
+    "pending": ("Waiting for farms", "wait"),
+    "partiallyFulfilled": ("Partly filled", "part"),
+    "fullyFulfilled": ("Filled", "done"),
+    "canceled": ("Cancelled", "off"),
+}
+
+
+def requestCardHtml(request):
+    from html import escape
+
+    unit = str(request.unit)
+    requested = float(request.quantityRequested)
+    received = float(request.quantityReceived)
+    reserved = float(request.quantityReserved)
+    remaining = float(request.quantityRemaining)
+    shortfall = float(request.quantityAllocated) - received - reserved
+    label, tone = REQUEST_STATUS_LABELS.get(str(request.status), (str(request.status), "off"))
+
+    receivedPercent = min(100.0, received / requested * 100) if requested else 0
+    reservedPercent = min(100.0 - receivedPercent, reserved / requested * 100) if requested else 0
+    if request.status == "canceled":
+        neededLabel = "Not needed"
+    elif request.status == "fullyFulfilled":
+        neededLabel = "Complete"
+    elif remaining <= 0.001:
+        neededLabel = "Fully reserved"
+    else:
+        neededLabel = f"Still needed {formatQuantity(remaining, unit)}"
+
+    icon = '<span class="material-symbols-rounded" aria-hidden="true">{}</span>'
+    foot = [f'<span>{icon.format("storefront")}{escape(str(request.marketName))} · {escape(str(request.marketLocation))}</span>']
+    if shortfall > 0.001:
+        foot.append(f'<span class="hl-mr-short">{icon.format("error")}{escape(formatQuantity(shortfall, unit))} short on delivery</span>')
+
+    return (
+        f'<article class="hl-mr hl-mr-{tone}"><div class="hl-mr-top">'
+        f'<span class="hl-mr-initial">{escape(str(request.cropName)[:1])}</span>'
+        f'<div class="hl-mr-title"><strong>{escape(str(request.cropName))}</strong>'
+        f'<small>Request #{int(request.requestID)} · {readableDate(request.requestDate) or "date not set"}</small></div>'
+        f'<span class="hl-alloc-pill hl-alloc-pill-{tone}">{escape(label)}</span></div>'
+        f'<div class="hl-produce-available"><b>{escape(formatQuantity(requested, unit))}</b> requested</div>'
+        f'<div class="hl-produce-bar"><span class="hl-bar-available" style="width:{receivedPercent:.1f}%"></span>'
+        f'<span class="hl-bar-reserved" style="width:{reservedPercent:.1f}%"></span></div>'
+        f'<div class="hl-mr-legend"><span><i class="hl-dot-available"></i>Received {escape(formatQuantity(received, unit))}</span>'
+        f'<span><i class="hl-dot-reserved"></i>Reserved {escape(formatQuantity(reserved, unit))}</span>'
+        f'<span><i class="hl-dot-needed"></i>{escape(neededLabel)}</span></div>'
+        f'<div class="hl-mr-foot">{"".join(foot)}</div></article>'
+    )
+
+
+@st.dialog("New request", width="medium")
+def newMarketRequestDialog(current_user, markets, crops, units):
+    marketOptions = {
+        f"{market.marketName} · {market.location}": int(market.marketID)
+        for market in markets.itertuples(index=False)
+    }
+    cropOptions = {
+        str(crop.cropName): int(crop.cropID)
+        for crop in crops.itertuples(index=False)
+    }
+
+    st.markdown(
+        '<div class="hl-release-head"><strong>Ask farms for produce</strong>'
+        '<span>Any farm with this crop in the same unit can fill your request.</span></div>',
+        unsafe_allow_html=True
+    )
+
+    with st.form("new_request_form", border=False):
+        marketLabel = st.selectbox("Deliver to", list(marketOptions.keys()))
+        cropLabel = st.selectbox("Crop", list(cropOptions.keys()))
+
+        amountColumn, unitColumn = st.columns([2, 1])
+        quantity = amountColumn.number_input(
+            "Amount",
+            min_value=0.01,
+            value=1.0
+        )
+        unit = unitColumn.selectbox(
+            "Unit",
+            units,
+            index=units.index("kg") if "kg" in units else 0,
+            help="Farms can only fill this from stock recorded in the same unit."
+        )
+
+        submitted = st.form_submit_button(
+            "Send request",
+            type="primary",
+            icon=":material/send:",
+            width="stretch"
+        )
+
+    if submitted:
+        created, message = createProduceRequest(
+            current_user=current_user,
+            cropID=cropOptions[cropLabel],
+            marketID=marketOptions[marketLabel],
+            quantity=quantity,
+            unit=unit
+        )
+
+        if created:
+            st.session_state.requestMessage = message
+            st.rerun()
+
+        else:
+            st.warning(message)
+
+
+def requestSummaryHtml(request):
+    from html import escape
+
+    return (
+        f'<div class="hl-release-head"><strong>{escape(str(request.cropName))} · Request #{int(request.requestID)}</strong>'
+        f'<span>{escape(formatQuantity(request.quantityRequested, request.unit))} for '
+        f'{escape(str(request.marketName))} · {escape(str(request.marketLocation))}</span></div>'
+    )
+
+
+@st.dialog("Edit request", width="medium")
+def editMarketRequestDialog(request, userID):
+    st.markdown(requestSummaryHtml(request), unsafe_allow_html=True)
+
+    with st.form(f"edit_request_form_{int(request.requestID)}", border=False):
+        newQuantity = st.number_input(
+            f"New amount ({request.unit})",
+            min_value=0.01,
+            value=float(request.quantityRequested),
+            help="The unit can't be changed. Cancel and make a new request to use another unit."
+        )
+
+        submitted = st.form_submit_button(
+            "Save changes",
+            type="primary",
+            icon=":material/check:",
+            width="stretch"
+        )
+
+    if submitted:
+        changed, message = updateMarketRequest(
+            requestID=int(request.requestID),
+            userID=userID,
+            newQuantity=newQuantity,
+            action="Update quantity"
+        )
+
+        if changed:
+            st.session_state.requestMessage = message
+            st.rerun()
+
+        else:
+            st.warning(message)
+
+
+@st.dialog("Cancel request", width="medium")
+def cancelMarketRequestDialog(request, userID):
+    st.markdown(requestSummaryHtml(request), unsafe_allow_html=True)
+    st.markdown(
+        '<div class="hl-alloc-note"><span class="material-symbols-rounded" aria-hidden="true">warning</span>'
+        '<span>Farms will no longer see this request. This can\'t be undone.</span></div>',
+        unsafe_allow_html=True
+    )
+
+    with st.form(f"cancel_request_form_{int(request.requestID)}", border=False):
+        cancellationReason = st.text_input(
+            "Reason for cancelling",
+            placeholder="e.g. No longer needed this week"
+        )
+
+        submitted = st.form_submit_button(
+            "Yes, cancel request",
+            type="primary",
+            icon=":material/close:",
+            width="stretch"
+        )
+
+    if submitted:
+        changed, message = updateMarketRequest(
+            requestID=int(request.requestID),
+            userID=userID,
+            newQuantity=float(request.quantityRequested),
+            action="Cancel request",
+            cancellationReason=cancellationReason
+        )
+
+        if changed:
+            st.session_state.requestMessage = message
+            st.rerun()
+
+        else:
+            st.warning(message)
+
+
 def showMarketRequests(current_user):
     st.header("My market requests")
 
@@ -4813,77 +5120,7 @@ def showMarketRequests(current_user):
     )
 
     units = getActiveUnits()
-
-    if markets.empty or crops.empty or not units:
-        st.info(
-            "Markets and crops must exist, and the application must have "
-            "at least one supported unit configured."
-        )
-
-    else:
-        marketOptions = makeOptions(
-            markets,
-            "marketID",
-            ["marketName", "location"]
-        )
-
-        cropOptions = makeOptions(
-            crops,
-            "cropID",
-            ["cropName"]
-        )
-
-        with st.expander(
-            "Create a request",
-            expanded=True
-        ):
-            with st.form(
-                "new_request_form",
-                clear_on_submit=True
-            ):
-                marketLabel = st.selectbox(
-                    "Market",
-                    list(marketOptions.keys())
-                )
-
-                cropLabel = st.selectbox(
-                    "Crop",
-                    list(cropOptions.keys())
-                )
-
-                quantity = st.number_input(
-                    "Quantity requested",
-                    min_value=0.01,
-                    value=1.0
-                )
-
-                unit = st.selectbox(
-                    "Unit",
-                    units,
-                    index=units.index("kg") if "kg" in units else 0
-                )
-
-                createSubmitted = (
-                    st.form_submit_button(
-                        "Create request"
-                    )
-                )
-
-            if createSubmitted:
-                created, message = createProduceRequest(
-                    current_user=current_user,
-                    cropID=int(cropOptions[cropLabel]),
-                    marketID=int(marketOptions[marketLabel]),
-                    quantity=quantity,
-                    unit=unit
-                )
-
-                if created:
-                    st.session_state.requestMessage = message
-                    st.rerun()
-
-                else:
-                    st.warning(message)
+    canCreate = not (markets.empty or crops.empty or not units)
 
     requests = selectData(
         """SELECT mr.requestID, m.marketName, m.location AS marketLocation, c.cropName, mr.quantityRequested, mr.unit, mr.requestDate, mr.reqStatus AS status
@@ -4894,8 +5131,10 @@ def showMarketRequests(current_user):
     )
 
     if requests.empty:
-        st.info("You have not created any requests.")
-        return
+        requests = pd.DataFrame(columns=[
+            "requestID", "marketName", "marketLocation", "cropName",
+            "quantityRequested", "unit", "requestDate", "status"
+        ])
 
     requests["quantityRequested"] = pd.to_numeric(
         requests["quantityRequested"]
@@ -4903,232 +5142,152 @@ def showMarketRequests(current_user):
 
     requests["quantityAllocated"] = 0.0
     requests["quantityReceived"] = 0.0
-    requests["deliveryDifference"] = 0.0
+    requests["quantityReserved"] = 0.0
     requests["quantityRemaining"] = 0.0
 
     for index, request in requests.iterrows():
-        requestID = int(request["requestID"])
-
-        progress = calculateRequestProgress(requestID)
+        progress = calculateRequestProgress(int(request["requestID"]))
 
         if progress is None:
             continue
 
-        requests.at[
-            index,
-            "quantityAllocated"
-        ] = progress["allocatedQuantity"]
+        requests.at[index, "quantityAllocated"] = progress["allocatedQuantity"]
+        requests.at[index, "quantityReceived"] = progress["receivedQuantity"]
+        requests.at[index, "quantityReserved"] = progress["outstandingReserved"]
+        requests.at[index, "quantityRemaining"] = progress["remainingQuantity"]
 
-        requests.at[
-            index,
-            "quantityReceived"
-        ] = progress["receivedQuantity"]
+    statusCounts = requests["status"].value_counts().to_dict()
+    statusOptions = ["All"] + [
+        status for status in REQUEST_STATUS_LABELS
+        if statusCounts.get(status)
+    ]
 
-        requests.at[
-            index,
-            "deliveryDifference"
-        ] = (
-            progress["allocatedQuantity"]
-            - progress["receivedQuantity"]
+    def statusChipLabel(status):
+        if status == "All":
+            return f"All ({len(requests)})"
+        return f"{REQUEST_STATUS_LABELS[status][0]} ({statusCounts[status]})"
+
+    selectedStatus = "All"
+    selectedMarket = "All"
+    selectedCrop = "All"
+    requestedAfter = None
+
+    with st.container(
+        horizontal=True,
+        vertical_alignment="center",
+        gap="small",
+        key="mr_filters"
+    ):
+        if not requests.empty:
+            selectedStatus = st.pills(
+                "Status",
+                statusOptions,
+                format_func=statusChipLabel,
+                default="All",
+                key="mr_status",
+                label_visibility="collapsed"
+            ) or "All"
+
+            with st.popover("More filters", icon=":material/tune:"):
+                selectedMarket = st.selectbox(
+                    "Market",
+                    ["All"] + sorted(requests["marketName"].unique().tolist()),
+                    key="mr_market"
+                )
+                selectedCrop = st.selectbox(
+                    "Crop",
+                    ["All"] + sorted(requests["cropName"].unique().tolist()),
+                    key="mr_crop"
+                )
+                requestedAfter = st.date_input(
+                    "Requested on or after",
+                    value=None,
+                    key="mr_date"
+                )
+
+        if st.button(
+            "New request",
+            key="mr_new",
+            type="primary",
+            icon=":material/add:",
+            disabled=not canCreate
+        ):
+            newMarketRequestDialog(current_user, markets, crops, units)
+
+    if not canCreate:
+        st.info(
+            "Markets and crops must exist, and the application must have "
+            "at least one supported unit configured."
         )
 
-        requests.at[
-            index,
-            "quantityRemaining"
-        ] = progress["remainingQuantity"]
-
-    st.subheader("Filter requests")
-
-    filterColumn1, filterColumn2 = st.columns(2)
-    filterColumn3, filterColumn4 = st.columns(2)
-
-    marketNames = (
-        ["All"] + sorted(
-            requests["marketName"].unique().tolist()
+    if requests.empty:
+        st.markdown(
+            '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+            'receipt_long</span><span>You haven\'t made any requests yet. Find produce in the Shop, '
+            'or click New request.</span></div>',
+            unsafe_allow_html=True
         )
-    )
-
-    cropNames = (
-        ["All"] + sorted(
-            requests["cropName"].unique().tolist()
-        )
-    )
-
-    selectedMarket = filterColumn1.selectbox(
-        "Market",
-        marketNames,
-        key="request_filter_market"
-    )
-
-    selectedCrop = filterColumn2.selectbox(
-        "Crop",
-        cropNames,
-        key="request_filter_crop"
-    )
-
-    selectedStatus = filterColumn3.selectbox(
-        "Status",
-        ["All"] + sorted(requestStatus),
-        key="request_filter_status"
-    )
-
-    requestedAfter = filterColumn4.date_input(
-        "Requested on or after",
-        value=None,
-        key="request_filter_date"
-    )
+        return
 
     filteredRequests = requests.copy()
 
+    if selectedStatus != "All":
+        filteredRequests = filteredRequests[filteredRequests["status"] == selectedStatus]
+
     if selectedMarket != "All":
-        filteredRequests = filteredRequests[
-            filteredRequests["marketName"] == selectedMarket
-        ]
+        filteredRequests = filteredRequests[filteredRequests["marketName"] == selectedMarket]
 
     if selectedCrop != "All":
-        filteredRequests = filteredRequests[
-            filteredRequests["cropName"] == selectedCrop
-        ]
-
-    if selectedStatus != "All":
-        filteredRequests = filteredRequests[
-            filteredRequests["status"] == selectedStatus
-        ]
+        filteredRequests = filteredRequests[filteredRequests["cropName"] == selectedCrop]
 
     if requestedAfter is not None:
-        requestDates = pd.to_datetime(
-            filteredRequests["requestDate"]
-        ).dt.date
+        requestDates = pd.to_datetime(filteredRequests["requestDate"]).dt.date
+        filteredRequests = filteredRequests[requestDates >= requestedAfter]
 
-        filteredRequests = filteredRequests[
-            requestDates >= requestedAfter
-        ]
-
-    st.subheader("Request records")
+    filterNotes = [
+        note for note in (
+            selectedMarket if selectedMarket != "All" else None,
+            selectedCrop if selectedCrop != "All" else None,
+            f"from {readableDate(requestedAfter)}" if requestedAfter else None,
+        ) if note
+    ]
+    if filterNotes:
+        st.caption("Filtered by " + ", ".join(filterNotes))
 
     if filteredRequests.empty:
-        st.info(
-            "No requests matched the selected filters."
+        st.markdown(
+            '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+            'search_off</span><span>No requests matched these filters.</span></div>',
+            unsafe_allow_html=True
         )
 
     else:
-        displayedRequests = filteredRequests[
-            [
-                "marketName",
-                "marketLocation",
-                "cropName",
-                "quantityRequested",
-                "quantityAllocated",
-                "quantityReceived",
-                "deliveryDifference",
-                "quantityRemaining",
-                "unit",
-                "requestDate",
-                "status"
-            ]
-        ].copy()
+        cards = list(filteredRequests.itertuples(index=False))
+        for cardStart in range(0, len(cards), 2):
+            columns = st.columns(2)
+            for column, request in zip(columns, cards[cardStart:cardStart + 2]):
+                requestID = int(request.requestID)
+                with column, st.container(key=f"mr_card_{requestID}"):
+                    st.markdown(requestCardHtml(request), unsafe_allow_html=True)
 
-        displayedRequests.columns = [
-            "Market",
-            "Market location",
-            "Crop",
-            "Requested",
-            "Allocated",
-            "Received",
-            "Delivery difference",
-            "Remaining request",
-            "Unit",
-            "Request date",
-            "Status"
-        ]
+                    if request.status == "pending":
+                        with st.container(horizontal=True, gap="small", key=f"mr_actions_{requestID}"):
+                            if st.button(
+                                "Edit amount",
+                                key=f"mr_edit_{requestID}",
+                                icon=":material/edit:",
+                                width="stretch"
+                            ):
+                                editMarketRequestDialog(request, userID)
 
-        showTable(
-            displayedRequests,
-            use_container_width=True,
-            hide_index=True
-        )
+                            if st.button(
+                                "Cancel request",
+                                key=f"mr_cancel_{requestID}",
+                                icon=":material/close:",
+                                width="stretch"
+                            ):
+                                cancelMarketRequestDialog(request, userID)
 
-    editable = requests[
-        requests["status"] == "pending"
-    ]
-
-    if editable.empty:
-        return
-
-    with st.expander(
-        "Update or cancel a pending request"
-    ):
-        editableRows = editable.index.tolist()
-
-        def showEditableRequest(rowIndex):
-            request = editable.loc[rowIndex]
-
-            return (
-                f"{request['marketName']} — "
-                f"{request['cropName']} — "
-                f"{request['quantityRequested']:,.2f} "
-                f"{request['unit']}"
-            )
-
-        selectedRequestRow = st.selectbox(
-            "Request",
-            editableRows,
-            format_func=showEditableRequest
-        )
-
-        selectedRequest = editable.loc[
-            selectedRequestRow
-        ]
-
-        currentQuantity = float(
-            selectedRequest["quantityRequested"]
-        )
-
-        with st.form(
-            "edit_request_form",
-            clear_on_submit=True
-        ):
-            newQuantity = st.number_input(
-                f"Requested quantity "
-                f"({selectedRequest['unit']})",
-                min_value=0.01,
-                value=currentQuantity
-            )
-
-            action = st.radio(
-                "Action",
-                [
-                    "Update quantity",
-                    "Cancel request"
-                ]
-            )
-
-            cancellationReason = st.text_input(
-                "Cancellation reason "
-                "(required only when canceling)"
-            )
-
-            editSubmitted = st.form_submit_button(
-                "Save change"
-            )
-
-        if editSubmitted:
-            changed, message = updateMarketRequest(
-                requestID=int(
-                    selectedRequest["requestID"]
-                ),
-                userID=userID,
-                newQuantity=newQuantity,
-                action=action,
-                cancellationReason=cancellationReason
-            )
-
-            if changed:
-                st.session_state.requestMessage = message
-                st.rerun()
-
-            else:
-                st.warning(message)
 
 def updateMarketRequest(
     requestID,
@@ -5259,8 +5418,115 @@ def getAllocationReservedForDisplay(allocationID):
     return max(Decimal("0"), balance)
 
 
+def deliveryCardHtml(allocation):
+    from html import escape
+
+    unit = str(allocation.unit)
+    expected = float(allocation.expectedNow)
+    released = float(allocation.quantityAllocated) - expected
+    statusText = "Partly delivered" if str(allocation.status) == "partiallyDelivered" else "On the way"
+
+    def fact(iconName, label, value, detail):
+        return (
+            f'<div class="hl-dl-fact"><span class="material-symbols-rounded" aria-hidden="true">{iconName}</span>'
+            f'<div><small>{label}</small><b>{escape(value)}</b><em>{escape(detail)}</em></div></div>'
+        )
+
+    facts = (
+        fact("agriculture", "From", str(allocation.farmName), str(allocation.farmLocation))
+        + fact("storefront", "To", str(allocation.marketName), str(allocation.marketLocation))
+        + fact("event", "Reserved", readableDate(allocation.allocationDate) or "Date not set",
+               f"Allocation #{int(allocation.allocationID)}")
+    )
+    releasedNote = ""
+    if released > 0.001:
+        releasedNote = (
+            '<div class="hl-dl-note"><span class="material-symbols-rounded" aria-hidden="true">undo</span>'
+            f'The farm released {escape(formatQuantity(released, unit))} of the '
+            f'{escape(formatQuantity(float(allocation.quantityAllocated), unit))} reserved</div>'
+        )
+
+    return (
+        f'<article class="hl-mr"><div class="hl-mr-top">'
+        f'<span class="hl-mr-initial">{escape(str(allocation.cropName)[:1])}</span>'
+        f'<div class="hl-mr-title"><strong>{escape(str(allocation.cropName))}</strong>'
+        f'<small>Request #{int(allocation.requestID)} · Lot #{int(allocation.lotID)}</small></div>'
+        f'<span class="hl-alloc-pill hl-alloc-pill-part">{statusText}</span></div>'
+        f'<div class="hl-produce-available hl-dl-amount"><b>{escape(formatQuantity(expected, unit))}</b> expected</div>'
+        f'<div class="hl-dl-facts">{facts}</div>{releasedNote}</article>'
+    )
+
+
+@st.dialog("Confirm delivery", width="medium")
+def confirmDeliveryDialog(allocation, userID):
+    from html import escape
+
+    allocationID = int(allocation.allocationID)
+    unit = str(allocation.unit)
+    expected = float(allocation.expectedNow)
+
+    st.markdown(
+        f'<div class="hl-release-head"><strong>{escape(str(allocation.cropName))} · Request #{int(allocation.requestID)}</strong>'
+        f'<span>{escape(formatQuantity(expected, unit))} expected from {escape(str(allocation.farmName))} '
+        f'for {escape(str(allocation.marketName))}. Enter what actually arrived.</span></div>',
+        unsafe_allow_html=True
+    )
+
+    allocatedOn = pd.to_datetime(allocation.allocationDate, errors="coerce")
+    earliestDate = None if pd.isna(allocatedOn) else allocatedOn.date()
+    if earliestDate is not None and earliestDate > date.today():
+        earliestDate = None
+
+    amountColumn, dateColumn = st.columns(2)
+    receivedQuantity = amountColumn.number_input(
+        f"Amount received ({unit})",
+        min_value=0.0,
+        max_value=expected,
+        value=expected,
+        key=f"dl_received_{allocationID}",
+        help="Enter 0 if nothing arrived."
+    )
+    deliveryDate = dateColumn.date_input(
+        "Delivery date",
+        value=date.today(),
+        min_value=earliestDate,
+        max_value=date.today(),
+        key=f"dl_date_{allocationID}"
+    )
+
+    shortfall = expected - float(receivedQuantity)
+    if shortfall > 0.001:
+        st.markdown(
+            '<div class="hl-alloc-note"><span class="material-symbols-rounded" aria-hidden="true">warning</span>'
+            f'<span>{escape(formatQuantity(shortfall, unit))} short. The missing amount goes back to the '
+            "farm's stock, and a receipt can't be changed once confirmed.</span></div>",
+            unsafe_allow_html=True
+        )
+
+    if st.button(
+        "Confirm delivery",
+        type="primary",
+        icon=":material/check:",
+        width="stretch",
+        key=f"dl_confirm_{allocationID}"
+    ):
+        confirmed, message = confirmDelivery(
+            allocationID,
+            receivedQuantity,
+            deliveryDate,
+            userID
+        )
+
+        if confirmed:
+            st.session_state.deliveryMessage = message
+            st.rerun()
+
+        else:
+            st.warning(message)
+
+
 def showDeliveries(current_user):
-    st.header("Confirm deliveries")
+    st.header("My deliveries")
 
     if current_user["role"] != "user":
         denyAccess(current_user, "Attempted to open buyer delivery confirmation")
@@ -5275,9 +5541,13 @@ def showDeliveries(current_user):
     allocations = selectData(
         """SELECT a.allocationID, a.requestID, a.lotID, c.cropName,
                   a.quantityAllocated, mr.unit, a.allocationDate,
-                  a.allocStatus AS status
-           FROM Allocations a, MarketRequests mr, Crops c
+                  a.allocStatus AS status, f.farmName, f.location AS farmLocation,
+                  m.marketName, m.location AS marketLocation
+           FROM Allocations a, MarketRequests mr, Crops c, HarvestLots hl,
+                CropCycle cc, Farms f, Markets m
            WHERE a.requestID = mr.requestID AND mr.cropID = c.cropID
+           AND a.lotID = hl.lotID AND hl.cycleID = cc.cycleID
+           AND cc.farmID = f.farmID AND mr.marketID = m.marketID
            AND mr.userID = %s
            AND a.allocStatus IN ('reserved', 'partiallyDelivered')
            AND NOT EXISTS (
@@ -5295,91 +5565,111 @@ def showDeliveries(current_user):
         )
         allocations = allocations[allocations["expectedNow"] > 0].copy()
 
+    st.subheader(f"On the way ({len(allocations)})")
+
     if allocations.empty:
-        st.info("There are no outstanding allocated deliveries to confirm.")
-        receipts = selectData(
-            """SELECT dr.receiptID, dr.requestID, dr.allocationID, c.cropName,
-                      dr.expectedQuantity, dr.receivedQuantity,
-                      dr.discrepancyQuantity, dr.unit, dr.deliveryDate
-               FROM DeliveryReceipts dr, MarketRequests mr, Crops c
-               WHERE dr.requestID = mr.requestID AND mr.cropID = c.cropID
-               AND mr.userID = %s
-               ORDER BY dr.deliveryDate DESC""",
-            (userID,)
+        st.markdown(
+            '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+            'local_shipping</span><span>Nothing on the way right now. Deliveries show up here once a '
+            'farm reserves stock for one of your requests.</span></div>',
+            unsafe_allow_html=True
         )
-        st.subheader("My delivery receipts")
-        if receipts.empty:
-            st.info("You have not confirmed any deliveries yet.")
-        else:
-            showTable(receipts, use_container_width=True, hide_index=True)
-        return
 
-    showTable(allocations, use_container_width=True, hide_index=True)
-    allocationOptions = makeOptions(
-        allocations,
-        "allocationID",
-        [
-            "allocationID",
-            "requestID",
-            "cropName",
-            "expectedNow",
-            "unit",
-        ]
-    )
+    else:
+        cards = list(allocations.itertuples(index=False))
+        for cardStart in range(0, len(cards), 2):
+            columns = st.columns(2) if len(cards) > 1 else [st.container()]
+            for column, allocation in zip(columns, cards[cardStart:cardStart + 2]):
+                allocationID = int(allocation.allocationID)
+                with column, st.container(key=f"dl_card_{allocationID}"):
+                    st.markdown(deliveryCardHtml(allocation), unsafe_allow_html=True)
 
-    with st.form("delivery_form"):
-        allocationLabel = st.selectbox(
-            "Allocation received",
-            list(allocationOptions.keys())
-        )
-        selectedID = allocationOptions[allocationLabel]
-        expectedNow = float(allocations.loc[
-            allocations["allocationID"] == selectedID, "expectedNow"
-        ].iloc[0])
-        selectedUnit = str(allocations.loc[
-            allocations["allocationID"] == selectedID, "unit"
-        ].iloc[0])
-        st.caption(f"Expected delivery: {expectedNow:,.2f} {selectedUnit}")
-        receivedQuantity = st.number_input(
-            "Quantity actually received",
-            min_value=0.0,
-            max_value=expectedNow,
-            value=0.0
-        )
-        deliveryDate = st.date_input(
-            "Delivery date",
-            max_value=date.today()
-        )
-        submitted = st.form_submit_button("Confirm delivery")
-
-        if submitted:
-            confirmed, message = confirmDelivery(
-                allocationOptions[allocationLabel],
-                receivedQuantity,
-                deliveryDate,
-                userID
-            )
-
-            if confirmed:
-                st.session_state.deliveryMessage = message
-                st.rerun()
-            else:
-                st.warning(message)
+                    if st.button(
+                        "Confirm delivery",
+                        key=f"dl_open_{allocationID}",
+                        type="primary",
+                        icon=":material/inventory:",
+                        width="stretch"
+                    ):
+                        confirmDeliveryDialog(allocation, userID)
 
     receipts = selectData(
         """SELECT dr.receiptID, dr.requestID, dr.allocationID, c.cropName,
-                  dr.expectedQuantity, dr.receivedQuantity,
+                  m.marketName, dr.expectedQuantity, dr.receivedQuantity,
                   dr.discrepancyQuantity, dr.unit, dr.deliveryDate
-           FROM DeliveryReceipts dr, MarketRequests mr, Crops c
+           FROM DeliveryReceipts dr, MarketRequests mr, Crops c, Markets m
            WHERE dr.requestID = mr.requestID AND mr.cropID = c.cropID
+           AND mr.marketID = m.marketID
            AND mr.userID = %s
            ORDER BY dr.deliveryDate DESC""",
         (userID,)
     )
 
-    st.subheader("My delivery receipts")
-    if not receipts.empty:
-        showTable(receipts, use_container_width=True, hide_index=True)
+    with st.container(horizontal=True, vertical_alignment="center", key="dl_receipts_head"):
+        st.subheader(f"Delivery receipts ({len(receipts)})")
+        view = st.segmented_control(
+            "Show as",
+            ["List", "Table"],
+            default="List",
+            key="dl_view",
+            on_change=keepDeliveryView,
+            label_visibility="collapsed"
+        )
+
+    if receipts.empty:
+        st.markdown(
+            '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+            'receipt_long</span><span>You haven\'t confirmed any deliveries yet.</span></div>',
+            unsafe_allow_html=True
+        )
+
+    elif view == "Table":
+        deliveredOn = pd.to_datetime(receipts["deliveryDate"], errors="coerce")
+        display = pd.DataFrame({
+            "Receipt #": receipts["receiptID"],
+            "Request #": receipts["requestID"],
+            "Crop": receipts["cropName"],
+            "Market": receipts["marketName"],
+            "Expected": receipts["expectedQuantity"],
+            "Received": receipts["receivedQuantity"],
+            "Short by": receipts["discrepancyQuantity"],
+            "Unit": receipts["unit"],
+            "Delivered on": deliveredOn.dt.strftime("%d %b %Y"),
+        })
+        showTable(display, use_container_width=True, hide_index=True)
+
+    else:
+        rows = "".join(receiptRowHtml(receipt) for receipt in receipts.itertuples(index=False))
+        st.markdown(f'<div class="hl-alloc-list">{rows}</div>', unsafe_allow_html=True)
+
+
+def keepDeliveryView():
+    if st.session_state.get("dl_view") is None:
+        st.session_state["dl_view"] = st.session_state.get("dl_view_last", "List")
+    st.session_state["dl_view_last"] = st.session_state["dl_view"]
+
+
+def receiptRowHtml(receipt):
+    from html import escape
+
+    unit = str(receipt.unit)
+    delivered = pd.to_datetime(receipt.deliveryDate, errors="coerce")
+    dayText, monthText = ("—", "") if pd.isna(delivered) else (str(delivered.day), delivered.strftime("%b").upper())
+    shortBy = float(receipt.discrepancyQuantity)
+    if shortBy > 0.001:
+        pill = f'<span class="hl-alloc-pill">Short by {escape(formatQuantity(shortBy, unit))}</span>'
+    else:
+        pill = '<span class="hl-alloc-pill hl-alloc-pill-done">Complete</span>'
+    return (
+        f'<div class="hl-alloc-row"><div class="hl-alloc-date"><b>{dayText}</b><span>{monthText}</span></div>'
+        f'<div class="hl-alloc-main"><strong>{escape(str(receipt.cropName))} · '
+        f'{escape(formatQuantity(float(receipt.receivedQuantity), unit))} of '
+        f'{escape(formatQuantity(float(receipt.expectedQuantity), unit))} received</strong>'
+        f'<small>{escape(str(receipt.marketName))} · Delivered {readableDate(receipt.deliveryDate) or "date not set"}</small>'
+        f'<small>Receipt #{int(receipt.receiptID)} · Request #{int(receipt.requestID)} · '
+        f'Allocation #{int(receipt.allocationID)}</small></div>'
+        f'<div class="hl-alloc-side">{pill}</div></div>'
+    )
 
 
 def confirmDelivery(allocationID, receivedQuantity, deliveryDate, userID):
