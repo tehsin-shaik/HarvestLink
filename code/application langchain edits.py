@@ -232,7 +232,7 @@ def addReferenceUnit(unitName, adminID):
         )
         if cursor.fetchone() is not None:
             connection.rollback()
-            return False, "That unit already exists. You can reactivate it below."
+            return False, "That unit already exists. You can reactivate it from its row."
         cursor.execute(
             "INSERT INTO Units (unitName, isActive) VALUES (%s, 1)", (unitName,)
         )
@@ -5812,8 +5812,170 @@ def confirmDelivery(allocationID, receivedQuantity, deliveryDate, userID):
 # Administrator pages
 # -----------------------------------------------------------------------------
 
+ROLE_LABELS = {
+    "farmer": ("Farmer", "Farmers", "hl-alloc-pill-part"),
+    "user": ("Market buyer", "Market buyers", "hl-role-buyer"),
+    "admin": ("Administrator", "Administrators", "hl-alloc-pill-done"),
+}
+
+
+def roleLabel(role):
+    return ROLE_LABELS.get(str(role), (str(role).title(),))[0]
+
+
+def userRowHtml(user, isSelf):
+    from html import escape
+
+    name = f"{user.fname} {user.lname}"
+    label, _, pillClass = ROLE_LABELS.get(str(user.role), (str(user.role), "", "hl-alloc-pill-off"))
+    youTag = '<span class="hl-you">You</span>' if isSelf else ""
+    return (
+        f'<div class="hl-urow"><span class="hl-mr-initial">{escape(str(user.fname)[:1].upper())}</span>'
+        f'<div class="hl-alloc-main"><strong>{escape(name)}{youTag}</strong>'
+        f'<small>{escape(str(user.email))}</small></div>'
+        f'<span class="hl-alloc-pill {pillClass}">{escape(label)}</span></div>'
+    )
+
+
+@st.dialog("Change role", width="medium")
+def changeUserRoleDialog(user, current_user):
+    from html import escape
+
+    userID = int(user.userID)
+    st.markdown(
+        f'<div class="hl-release-head"><strong>{escape(f"{user.fname} {user.lname}")}</strong>'
+        f'<span>{escape(str(user.email))} · currently {escape(roleLabel(user.role))}</span></div>',
+        unsafe_allow_html=True
+    )
+
+    roleOptions = sorted(roles)
+    with st.form(f"admin_change_role_form_{userID}", border=False):
+        newRole = st.selectbox(
+            "New role",
+            roleOptions,
+            index=roleOptions.index(str(user.role)) if str(user.role) in roleOptions else 0,
+            format_func=roleLabel,
+            help="Farmers manage farms and stock, market buyers request produce, and administrators manage the system."
+        )
+        submitted = st.form_submit_button(
+            "Save role",
+            type="primary",
+            icon=":material/check:",
+            width="stretch"
+        )
+
+    if submitted:
+        if userID == int(current_user["userID"]):
+            st.warning("You cannot change your own administrator role here.")
+        elif changeData(
+            "UPDATE Users SET role = %s WHERE userID = %s",
+            (newRole, userID)
+        ):
+            logActivity(
+                current_user["userID"],
+                "admin_role_changed",
+                f"Changed user {userID} to {newRole}"
+            )
+            st.session_state.adminUserMessage = "User role updated successfully."
+            st.rerun()
+
+
+@st.dialog("Add user", width="medium")
+def addUserDialog(current_user):
+    st.markdown(
+        '<div class="hl-release-head"><strong>Create an account</strong>'
+        '<span>A new farmer also gets their first farm, which you can rename later.</span></div>',
+        unsafe_allow_html=True
+    )
+
+    nameColumns = st.columns(2)
+    firstName = nameColumns[0].text_input("First name", key="admin_new_fname")
+    lastName = nameColumns[1].text_input("Last name", key="admin_new_lname")
+    email = st.text_input("Email", key="admin_new_email")
+    roleColumns = st.columns(2)
+    role = roleColumns[0].selectbox("Role", sorted(roles), format_func=roleLabel, key="admin_new_role")
+    password = roleColumns[1].text_input("Demonstration password", type="password", key="admin_new_password")
+    farm_name = ""
+    farm_location = ""
+    if role == "farmer":
+        farmColumns = st.columns(2)
+        farm_name = farmColumns[0].text_input("Farm name", key="admin_new_farm")
+        farm_location = farmColumns[1].text_input("Farm location or emirate", key="admin_new_farm_location")
+
+    if st.button("Add user", type="primary", icon=":material/check:", width="stretch", key="admin_new_submit"):
+        if not firstName.strip() or not lastName.strip() or not email.strip() or not password:
+            st.warning("Complete all user fields.")
+        elif not isValidEmail(email.strip().lower()):
+            st.warning("Enter a valid email address.")
+        elif role == "farmer" and (
+            not farm_name.strip() or not farm_location.strip()
+        ):
+            st.warning("Enter the farm name and location for the farmer.")
+        else:
+            connection = None
+            cursor = None
+            try:
+                connection = getConnection()
+                cursor = connection.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO Users (fname, lname, role, email, passwordHash)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        firstName.strip(),
+                        lastName.strip(),
+                        role,
+                        email.strip().lower(),
+                        hashPassword(password),
+                    ),
+                )
+                user_id = cursor.lastrowid
+
+                if role == "farmer":
+                    cursor.execute(
+                        """
+                        INSERT INTO Farms (farmName, location)
+                        VALUES (%s, %s)
+                        """,
+                        (
+                            farm_name.strip(),
+                            farm_location.strip(),
+                        ),
+                    )
+                    farmID = cursor.lastrowid
+                    cursor.execute(
+                        "INSERT INTO OwnedBy (userID, farmID) VALUES (%s, %s)",
+                        (user_id, farmID)
+                    )
+
+                connection.commit()
+                logActivity(
+                    current_user["userID"],
+                    "admin_user_created",
+                    f"Created user {user_id}"
+                )
+                st.session_state.adminUserMessage = "User added successfully."
+                st.rerun()
+            except Exception as error:
+                if connection:
+                    connection.rollback()
+                st.error(friendlyDatabaseError(error))
+            finally:
+                if cursor:
+                    cursor.close()
+                if connection:
+                    connection.close()
+
+
+def keepUserView():
+    if st.session_state.get("adm_user_view") is None:
+        st.session_state["adm_user_view"] = st.session_state.get("adm_user_view_last", "List")
+    st.session_state["adm_user_view_last"] = st.session_state["adm_user_view"]
+
+
 def showAdminUserManagement(current_user):
-    st.header("User management and security audit")
+    st.header("Users and security")
 
     if current_user["role"] != "admin":
         denyAccess(current_user, "Attempted to open administrator user management")
@@ -5822,116 +5984,111 @@ def showAdminUserManagement(current_user):
     usersTab, auditTab = st.tabs(["User accounts", "Security activity"])
 
     with usersTab:
+        if "adminUserMessage" in st.session_state:
+            st.success(st.session_state.pop("adminUserMessage"))
+
         users = selectData(
             """SELECT userID, fname, lname, role, email
                FROM Users
                ORDER BY fname, lname"""
         )
 
+        roleCounts = users["role"].value_counts().to_dict() if not users.empty else {}
+        roleOptions = ["All"] + [role for role in ROLE_LABELS if roleCounts.get(role)]
+
+        def roleChipLabel(role):
+            if role == "All":
+                return f"All ({len(users)})"
+            return f"{ROLE_LABELS[role][1]} ({roleCounts[role]})"
+
+        selectedRole = "All"
+        search = ""
+        view = "List"
+
+        with st.container(
+            horizontal=True,
+            vertical_alignment="center",
+            gap="small",
+            key="adm_user_filters"
+        ):
+            if not users.empty:
+                selectedRole = st.pills(
+                    "Role",
+                    roleOptions,
+                    format_func=roleChipLabel,
+                    default="All",
+                    key="adm_user_role",
+                    label_visibility="collapsed"
+                ) or "All"
+                search = st.text_input(
+                    "Search",
+                    placeholder="Search name or email",
+                    key="adm_user_search",
+                    label_visibility="collapsed",
+                    icon=":material/search:"
+                )
+                view = st.segmented_control(
+                    "Show as",
+                    ["List", "Table"],
+                    default="List",
+                    key="adm_user_view",
+                    on_change=keepUserView,
+                    label_visibility="collapsed"
+                )
+
+            if st.button("Add user", key="adm_user_add", type="primary", icon=":material/person_add:"):
+                addUserDialog(current_user)
+
+        shown = users
+        if selectedRole != "All":
+            shown = shown[shown["role"] == selectedRole]
+        if search.strip():
+            needle = search.strip().lower()
+            shown = shown[
+                (shown["fname"] + " " + shown["lname"]).str.lower().str.contains(needle, regex=False)
+                | shown["email"].str.lower().str.contains(needle, regex=False)
+            ]
+
         if users.empty:
             st.info("There are no user accounts.")
-        else:
-            showTable(users, use_container_width=True, hide_index=True)
-            userOptions = makeOptions(
-                users,
-                "userID",
-                ["fname", "lname", "email", "role"]
+        elif shown.empty:
+            st.markdown(
+                '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+                'person_search</span><span>No accounts match these filters.</span></div>',
+                unsafe_allow_html=True
             )
-
-            with st.form("admin_change_role_form"):
-                selectedUser = st.selectbox(
-                    "User",
-                    list(userOptions.keys())
-                )
-                newRole = st.selectbox("New role", sorted(roles))
-                roleSubmitted = st.form_submit_button("Update role")
-
-            if roleSubmitted:
-                selectedUserID = int(userOptions[selectedUser])
-
-                if selectedUserID == int(current_user["userID"]):
-                    st.warning("You cannot change your own administrator role here.")
-                elif changeData(
-                    "UPDATE Users SET role = %s WHERE userID = %s",
-                    (newRole, selectedUserID)
-                ):
-                    logActivity(
-                        current_user["userID"],
-                        "admin_role_changed",
-                        f"Changed user {selectedUserID} to {newRole}"
-                    )
-                    st.success("User role updated successfully.")
-                    st.rerun()
+        elif view == "Table":
+            display = pd.DataFrame({
+                "Name": shown["fname"] + " " + shown["lname"],
+                "Email": shown["email"],
+                "Role": shown["role"].map(roleLabel),
+            })
+            showTable(display, use_container_width=True, hide_index=True)
+        else:
+            selfID = int(current_user["userID"])
+            with st.container(key="adm_user_list", gap=None):
+                for user in shown.itertuples(index=False):
+                    userID = int(user.userID)
+                    isSelf = userID == selfID
+                    with st.container(
+                        horizontal=True,
+                        vertical_alignment="center",
+                        key=f"adm_urow_{userID}"
+                    ):
+                        st.markdown(userRowHtml(user, isSelf), unsafe_allow_html=True)
+                        if st.button(
+                            "Change role",
+                            key=f"adm_role_{userID}",
+                            icon=":material/manage_accounts:",
+                            disabled=isSelf,
+                            help="You can't change your own role." if isSelf else None
+                        ):
+                            changeUserRoleDialog(user, current_user)
 
     with auditTab:
         if "permissionTestMessage" in st.session_state:
             st.success(st.session_state.permissionTestMessage)
             del st.session_state.permissionTestMessage
-
-        with st.expander("Demonstrate denied farm access"):
-            farmers = selectData(
-                """SELECT userID, fname, lname
-                   FROM Users
-                   WHERE role = 'farmer'
-                   ORDER BY fname, lname"""
-            )
-            farms = selectData(
-                """SELECT farmID, farmName, location
-                   FROM Farms
-                   ORDER BY farmName"""
-            )
-
-            if farmers.empty or farms.empty:
-                st.info("Add at least one farmer and farm first.")
-            else:
-                farmerOptions = makeOptions(
-                    farmers,
-                    "userID",
-                    ["fname", "lname"]
-                )
-                farmOptions = makeOptions(
-                    farms,
-                    "farmID",
-                    ["farmName", "location"]
-                )
-
-                selectedFarmer = st.selectbox(
-                    "Farmer account",
-                    list(farmerOptions.keys()),
-                    key="permission_test_farmer"
-                )
-                selectedFarm = st.selectbox(
-                    "Farm to test",
-                    list(farmOptions.keys()),
-                    key="permission_test_farm"
-                )
-
-                if st.button("Test farm permission"):
-                    testedUserID = int(farmerOptions[selectedFarmer])
-                    testedFarmID = int(farmOptions[selectedFarm])
-                    ownership = selectData(
-                        """SELECT userID
-                           FROM OwnedBy
-                           WHERE userID = %s AND farmID = %s""",
-                        (testedUserID, testedFarmID),
-                        show_error=False
-                    )
-
-                    if ownership.empty:
-                        logActivity(
-                            testedUserID,
-                            "access_denied",
-                            f"Permission test denied access to farm {testedFarmID}; tested by admin {current_user['userID']}"
-                        )
-                        st.session_state.permissionTestMessage = (
-                            "Access was correctly denied and recorded in the audit log."
-                        )
-                        st.rerun()
-                    else:
-                        st.warning(
-                            "This farmer owns the selected farm, so access is allowed. "
-                            "Choose an unassigned farm to demonstrate a denial."
-                        )
 
         activity = selectData(
             """SELECT al.activityID,
@@ -5943,314 +6100,667 @@ def showAdminUserManagement(current_user):
         )
 
         if activity.empty:
+            activity = pd.DataFrame(columns=[
+                "activityID", "performedBy", "role", "actionType", "actionDate", "details"
+            ])
+
+        activity["group"] = activity["actionType"].map(activityGroup)
+        groupCounts = activity["group"].value_counts().to_dict()
+        groupOptions = ["All"] + [group for group in ACTIVITY_GROUPS if groupCounts.get(group)]
+
+        def groupChipLabel(group):
+            if group == "All":
+                return f"All ({len(activity)})"
+            return f"{ACTIVITY_GROUPS[group]} ({groupCounts[group]})"
+
+        selectedGroup = "All"
+        selectedAction = "All"
+        selectedPerson = "All"
+        view = "List"
+
+        with st.container(
+            horizontal=True,
+            vertical_alignment="center",
+            gap="small",
+            key="adm_act_filters"
+        ):
+            if not activity.empty:
+                selectedGroup = st.pills(
+                    "Activity",
+                    groupOptions,
+                    format_func=groupChipLabel,
+                    default="All",
+                    key="adm_act_group",
+                    label_visibility="collapsed"
+                ) or "All"
+
+                with st.popover("More filters", icon=":material/tune:"):
+                    selectedAction = st.selectbox(
+                        "Activity type",
+                        ["All"] + sorted(activity["actionType"].unique().tolist(), key=activityLabel),
+                        format_func=lambda action: action if action == "All" else activityLabel(action),
+                        key="adm_act_type"
+                    )
+                    selectedPerson = st.selectbox(
+                        "Person",
+                        ["All"] + sorted(activity["performedBy"].unique().tolist()),
+                        key="adm_act_person"
+                    )
+
+                view = st.segmented_control(
+                    "Show as",
+                    ["List", "Table"],
+                    default="List",
+                    key="adm_act_view",
+                    on_change=keepActivityView,
+                    label_visibility="collapsed"
+                )
+
+            if st.button("Test farm access", key="adm_act_test", icon=":material/shield:"):
+                farmAccessTestDialog(current_user)
+
+        shown = activity
+        if selectedGroup != "All":
+            shown = shown[shown["group"] == selectedGroup]
+        if selectedAction != "All":
+            shown = shown[shown["actionType"] == selectedAction]
+        if selectedPerson != "All":
+            shown = shown[shown["performedBy"] == selectedPerson]
+
+        if activity.empty:
             st.info("No security activity has been recorded yet.")
-        else:
-            actionOptions = ["All"] + sorted(
-                activity["actionType"].unique().tolist()
+        elif shown.empty:
+            st.markdown(
+                '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+                'manage_search</span><span>No activity matches these filters.</span></div>',
+                unsafe_allow_html=True
             )
-            selectedAction = st.selectbox("Activity type", actionOptions)
+        elif view == "Table":
+            when = pd.to_datetime(shown["actionDate"], errors="coerce")
+            display = pd.DataFrame({
+                "When": when.dt.strftime("%d %b %Y, %H:%M"),
+                "Person": shown["performedBy"],
+                "Role": shown["role"].map(roleLabel),
+                "Activity": shown["actionType"].map(activityLabel),
+                "Details": shown["details"].fillna(""),
+            })
+            showTable(display, use_container_width=True, hide_index=True)
+        else:
+            limit = st.session_state.get("adm_act_limit", 40)
+            rows = "".join(
+                activityRowHtml(entry) for entry in shown.head(limit).itertuples(index=False)
+            )
+            st.markdown(f'<div class="hl-alloc-list hl-act-list">{rows}</div>', unsafe_allow_html=True)
 
-            if selectedAction != "All":
-                activity = activity[
-                    activity["actionType"] == selectedAction
-                ]
+            if len(shown) > limit:
+                st.caption(f"Showing the latest {limit} of {len(shown)}.")
+                if st.button("Show more", key="adm_act_more", icon=":material/expand_more:"):
+                    st.session_state["adm_act_limit"] = limit + 40
+                    st.rerun()
 
-            showTable(activity, use_container_width=True, hide_index=True)
+
+ACTIVITY_GROUPS = {
+    "denied": "Denied",
+    "changes": "Changes",
+    "signin": "Sign-ins",
+}
+
+ACTIVITY_LABELS = {
+    "login": "Signed in",
+    "logout": "Signed out",
+    "access_denied": "Access denied",
+    "assistant_access_denied": "FittonAI refused a question",
+    "assistant_query_blocked": "FittonAI blocked a query",
+    "admin_role_changed": "Changed a user's role",
+    "admin_user_created": "Added a user",
+    "admin_crop_created": "Added a crop",
+    "admin_crop_updated": "Updated a crop",
+    "admin_market_created": "Added a market",
+    "admin_market_updated": "Updated a market",
+    "unit_added": "Added a unit",
+    "unit_status_changed": "Changed a unit's status",
+    "farm_created": "Added a farm",
+    "harvest_recorded": "Recorded a harvest",
+    "allocation_created": "Reserved stock",
+    "reservation_released": "Released a reservation",
+    "delivery_confirmed": "Confirmed a delivery",
+}
+
+
+def activityLabel(actionType):
+    actionType = str(actionType)
+    return ACTIVITY_LABELS.get(actionType, actionType.replace("_", " ").capitalize())
+
+
+def activityGroup(actionType):
+    actionType = str(actionType)
+    if actionType in {"login", "logout"}:
+        return "signin"
+    if "denied" in actionType or "blocked" in actionType:
+        return "denied"
+    return "changes"
+
+
+def activityRowHtml(entry):
+    from html import escape
+
+    when = pd.to_datetime(entry.actionDate, errors="coerce")
+    dayText, monthText, timeText = ("—", "", "") if pd.isna(when) else (
+        str(when.day), when.strftime("%b").upper(), when.strftime("%H:%M")
+    )
+    group = activityGroup(entry.actionType)
+    pillClass, pillText = {
+        "denied": ("hl-alloc-pill-wait", "Denied"),
+        "changes": ("hl-alloc-pill-part", "Change"),
+        "signin": ("hl-alloc-pill-off", "Sign-in"),
+    }[group]
+    details = "" if pd.isna(entry.details) or group == "signin" else str(entry.details)
+    detailsHtml = f'<small>{escape(details)}</small>' if details else ""
+    return (
+        f'<div class="hl-alloc-row"><div class="hl-alloc-date"><b>{dayText}</b><span>{monthText}</span></div>'
+        f'<div class="hl-alloc-main"><strong>{escape(activityLabel(entry.actionType))}</strong>'
+        f'<small>{escape(str(entry.performedBy))} · {escape(roleLabel(entry.role))} · {timeText}</small>'
+        f'{detailsHtml}</div>'
+        f'<div class="hl-alloc-side"><span class="hl-alloc-pill {pillClass}">{pillText}</span></div></div>'
+    )
+
+
+def keepActivityView():
+    if st.session_state.get("adm_act_view") is None:
+        st.session_state["adm_act_view"] = st.session_state.get("adm_act_view_last", "List")
+    st.session_state["adm_act_view_last"] = st.session_state["adm_act_view"]
+
+
+@st.dialog("Test farm access", width="medium")
+def farmAccessTestDialog(current_user):
+    st.markdown(
+        '<div class="hl-release-head"><strong>Check a farmer can only reach their own farms</strong>'
+        '<span>Pick a farm the farmer doesn\'t own. The app should refuse access and record it in the activity log.</span></div>',
+        unsafe_allow_html=True
+    )
+
+    farmers = selectData(
+        """SELECT userID, fname, lname
+           FROM Users
+           WHERE role = 'farmer'
+           ORDER BY fname, lname"""
+    )
+    farms = selectData(
+        """SELECT farmID, farmName, location
+           FROM Farms
+           ORDER BY farmName"""
+    )
+
+    if farmers.empty or farms.empty:
+        st.info("Add at least one farmer and farm first.")
+        return
+
+    farmerOptions = {
+        f"{row.fname} {row.lname}": int(row.userID) for row in farmers.itertuples(index=False)
+    }
+    farmOptions = {
+        f"{row.farmName} · {row.location}": int(row.farmID) for row in farms.itertuples(index=False)
+    }
+
+    columns = st.columns(2)
+    selectedFarmer = columns[0].selectbox(
+        "Farmer account",
+        list(farmerOptions.keys()),
+        key="permission_test_farmer"
+    )
+    selectedFarm = columns[1].selectbox(
+        "Farm to test",
+        list(farmOptions.keys()),
+        key="permission_test_farm"
+    )
+
+    if st.button("Run test", type="primary", icon=":material/check:", width="stretch", key="permission_test_run"):
+        testedUserID = farmerOptions[selectedFarmer]
+        testedFarmID = farmOptions[selectedFarm]
+        ownership = selectData(
+            """SELECT userID
+               FROM OwnedBy
+               WHERE userID = %s AND farmID = %s""",
+            (testedUserID, testedFarmID),
+            show_error=False
+        )
+
+        if ownership.empty:
+            logActivity(
+                testedUserID,
+                "access_denied",
+                f"Permission test denied access to farm {testedFarmID}; tested by admin {current_user['userID']}"
+            )
+            st.session_state.permissionTestMessage = (
+                "Access was correctly denied and recorded in the audit log."
+            )
+            st.rerun()
+        else:
+            st.warning(
+                "This farmer owns the selected farm, so access is allowed. "
+                "Choose an unassigned farm to demonstrate a denial."
+            )
+
+
+UNIT_NAMES = {
+    "g": "Grams",
+    "kg": "Kilograms",
+    "ton": "Tonnes",
+    "piece": "Pieces",
+    "box": "Boxes",
+}
+
+
+def isActiveFlag(value):
+    return bool(int(value)) if str(value).strip().isdigit() else bool(value)
+
+
+def referenceRowHtml(title, subtitle, isActive):
+    from html import escape
+
+    pill = (
+        '<span class="hl-alloc-pill hl-alloc-pill-part">Active</span>'
+        if isActive else
+        '<span class="hl-alloc-pill hl-alloc-pill-off">Inactive</span>'
+    )
+    return (
+        f'<div class="hl-urow"><span class="hl-mr-initial">{escape(str(title)[:1].upper())}</span>'
+        f'<div class="hl-alloc-main"><strong>{escape(str(title))}</strong>'
+        f'<small>{escape(str(subtitle))}</small></div>{pill}</div>'
+    )
+
+
+def referenceHead(kind, title, count, note, buttonLabel):
+    from html import escape
+
+    with st.container(horizontal=True, vertical_alignment="center", key=f"adm_refhead_{kind}"):
+        st.markdown(
+            f'<div class="hl-ref-head"><strong>{escape(title)} ({count})</strong>'
+            f'<span>{escape(note)}</span></div>',
+            unsafe_allow_html=True
+        )
+        return st.button(
+            buttonLabel,
+            type="primary",
+            icon=":material/add:",
+            key=f"adm_refadd_{kind}"
+        )
+
+
+def statusIndex(isActive):
+    return 0 if isActive else 1
+
+
+@st.dialog("Add crop", width="medium")
+def addCropDialog(current_user):
+    st.markdown(
+        '<div class="hl-release-head"><strong>Add a crop</strong>'
+        '<span>New crops are active straight away, so farmers can plan cycles with them.</span></div>',
+        unsafe_allow_html=True
+    )
+    with st.form("admin_add_crop", border=False):
+        crop_name = st.text_input("Crop name", placeholder="e.g. Tomatoes")
+        submitted = st.form_submit_button("Add crop", type="primary", icon=":material/check:", width="stretch")
+    if submitted:
+        name = crop_name.strip()
+        if not name or len(name) > 100:
+            st.warning("Enter a crop name of 1-100 characters.")
+        elif changeData(
+            "INSERT INTO Crops (cropName, isActive) VALUES (%s, 1)", (name,)
+        ):
+            logActivity(current_user["userID"], "admin_crop_created", f"Added crop {name}")
+            st.session_state["adminCropMessage"] = "Crop added successfully."
+            st.rerun()
+
+
+@st.dialog("Edit crop", width="medium")
+def editCropDialog(crop, current_user):
+    from html import escape
+
+    cropID = int(crop.cropID)
+    st.markdown(
+        f'<div class="hl-release-head"><strong>{escape(str(crop.cropName))} · Crop #{cropID}</strong>'
+        '<span>Inactive crops stay in past records but can\'t be picked for new entries.</span></div>',
+        unsafe_allow_html=True
+    )
+    with st.form(f"admin_edit_crop_{cropID}", border=False):
+        columns = st.columns(2)
+        updatedName = columns[0].text_input("Crop name", value=str(crop.cropName))
+        activeLabel = columns[1].selectbox(
+            "Status", ["Active", "Inactive"], index=statusIndex(isActiveFlag(crop.isActive))
+        )
+        editSubmitted = st.form_submit_button("Save changes", type="primary", icon=":material/check:", width="stretch")
+    if editSubmitted:
+        success, message = changeReferenceCrop(
+            cropID, updatedName, activeLabel == "Active", current_user["userID"]
+        )
+        if success:
+            st.session_state["adminCropMessage"] = message
+            st.rerun()
+        else:
+            st.warning(message)
+
+
+@st.dialog("Add market", width="medium")
+def addMarketDialog(current_user):
+    st.markdown(
+        '<div class="hl-release-head"><strong>Add a market</strong>'
+        '<span>Buyers can send requests to a new market straight away.</span></div>',
+        unsafe_allow_html=True
+    )
+    with st.form("admin_add_market", border=False):
+        columns = st.columns(2)
+        market_name = columns[0].text_input("Market name", placeholder="e.g. Al Ain Market")
+        market_location = columns[1].text_input("Location", placeholder="e.g. Al Ain")
+        submitted = st.form_submit_button("Add market", type="primary", icon=":material/check:", width="stretch")
+    if submitted:
+        name = market_name.strip()
+        place = market_location.strip()
+        if not name or len(name) > 100 or not place or len(place) > 255:
+            st.warning("Enter a market name (1-100) and location (1-255).")
+        elif changeData(
+            "INSERT INTO Markets (marketName, location, isActive) VALUES (%s, %s, 1)",
+            (name, place)
+        ):
+            logActivity(current_user["userID"], "admin_market_created", f"Added market {name}")
+            st.session_state["adminMarketMessage"] = "Market added successfully."
+            st.rerun()
+
+
+@st.dialog("Edit market", width="medium")
+def editMarketDialog(market, current_user):
+    from html import escape
+
+    marketID = int(market.marketID)
+    st.markdown(
+        f'<div class="hl-release-head"><strong>{escape(str(market.marketName))} · Market #{marketID}</strong>'
+        '<span>Inactive markets stay on earlier requests but can\'t be chosen for new ones.</span></div>',
+        unsafe_allow_html=True
+    )
+    with st.form(f"admin_edit_market_{marketID}", border=False):
+        columns = st.columns(2)
+        updatedName = columns[0].text_input("Market name", value=str(market.marketName))
+        updatedLocation = columns[1].text_input("Location", value=str(market.location))
+        activeLabel = st.selectbox(
+            "Status", ["Active", "Inactive"], index=statusIndex(isActiveFlag(market.isActive))
+        )
+        editSubmitted = st.form_submit_button("Save changes", type="primary", icon=":material/check:", width="stretch")
+    if editSubmitted:
+        success, message = changeReferenceMarket(
+            marketID, updatedName, updatedLocation,
+            activeLabel == "Active", current_user["userID"]
+        )
+        if success:
+            st.session_state["adminMarketMessage"] = message
+            st.rerun()
+        else:
+            st.warning(message)
+
+
+@st.dialog("Add unit", width="medium")
+def addUnitDialog(current_user):
+    st.markdown(
+        '<div class="hl-release-head"><strong>Add a unit</strong>'
+        '<span>Farmers and buyers can pick it for new harvests and requests.</span></div>',
+        unsafe_allow_html=True
+    )
+    with st.form("admin_add_unit", border=False):
+        newUnit = st.text_input("Unit", placeholder="e.g. crate")
+        addUnitSubmitted = st.form_submit_button("Add unit", type="primary", icon=":material/check:", width="stretch")
+    if addUnitSubmitted:
+        success, message = addReferenceUnit(newUnit, current_user["userID"])
+        if success:
+            st.session_state["adminUnitMessage"] = message
+            st.rerun()
+        else:
+            st.warning(message)
+
+
+@st.dialog("Change unit status", width="medium")
+def editUnitDialog(unit, current_user):
+    from html import escape
+
+    unitName = str(unit.unitName)
+    currentlyActive = isActiveFlag(unit.isActive)
+    st.markdown(
+        f'<div class="hl-release-head"><strong>{escape(unitName)}</strong>'
+        f'<span>Currently {"active" if currentlyActive else "inactive"}. Inactive units stay in older records '
+        'but can\'t be picked for new entries.</span></div>',
+        unsafe_allow_html=True
+    )
+    with st.form("admin_change_unit_status", border=False):
+        desiredStatus = st.selectbox(
+            "Status", ["Active", "Inactive"], index=statusIndex(currentlyActive)
+        )
+        statusSubmitted = st.form_submit_button("Save status", type="primary", icon=":material/check:", width="stretch")
+    if statusSubmitted:
+        success, message = setReferenceUnitActive(
+            unitName, desiredStatus == "Active", current_user["userID"]
+        )
+        if success:
+            st.session_state["adminUnitMessage"] = message
+            st.rerun()
+        else:
+            st.warning(message)
+
 
 def showAdminReferenceData(current_user):
-    st.header("Administrator reference data")
+    st.header("Reference data")
 
     if current_user["role"] != "admin":
         denyAccess(current_user, "Attempted to open administrator reference data")
         return
 
-    user_tab, crop_tab, market_tab, unit_tab = st.tabs(
-        ["Users", "Crops", "Markets", "Units"]
+    crop_tab, market_tab, unit_tab = st.tabs(
+        ["Crops", "Markets", "Units"]
     )
 
-    with user_tab:
-        users = selectData(
-            """SELECT userID, fname, lname, role, email
-               FROM Users
-               ORDER BY fname, lname"""
-        )
-        showTable(users, use_container_width=True, hide_index=True)
-
-        with st.form("admin_add_user"):
-            firstName = st.text_input("First name")
-            lastName = st.text_input("Last name")
-            role = st.selectbox("Role", sorted(roles))
-            email = st.text_input("Email")
-            password = st.text_input("Demonstration password", type="password")
-            farm_name = ""
-            farm_location = ""
-            if role == "farmer":
-                farm_name = st.text_input("Farm name")
-                farm_location = st.text_input("Farm location or emirate")
-            submitted = st.form_submit_button("Add user")
-
-            if submitted:
-                if not firstName.strip() or not lastName.strip() or not email.strip() or not password:
-                    st.warning("Complete all user fields.")
-                elif not isValidEmail(email.strip().lower()):
-                    st.warning("Enter a valid email address.")
-                elif role == "farmer" and (
-                    not farm_name.strip() or not farm_location.strip()
-                ):
-                    st.warning("Enter the farm name and location for the farmer.")
-                else:
-                    connection = None
-                    cursor = None
-                    try:
-                        connection = getConnection()
-                        cursor = connection.cursor()
-                        cursor.execute(
-                            """
-                            INSERT INTO Users (fname, lname, role, email, passwordHash)
-                            VALUES (%s, %s, %s, %s, %s)
-                            """,
-                            (
-                                firstName.strip(),
-                                lastName.strip(),
-                                role,
-                                email.strip().lower(),
-                                hashPassword(password),
-                            ),
-                        )
-                        user_id = cursor.lastrowid
-
-                        if role == "farmer":
-                            cursor.execute(
-                                """
-                                INSERT INTO Farms (farmName, location)
-                                VALUES (%s, %s)
-                                """,
-                                (
-                                    farm_name.strip(),
-                                    farm_location.strip(),
-                                ),
-                            )
-                            farmID = cursor.lastrowid
-                            cursor.execute(
-                                "INSERT INTO OwnedBy (userID, farmID) VALUES (%s, %s)",
-                                (user_id, farmID)
-                            )
-
-                        connection.commit()
-                        logActivity(
-                            current_user["userID"],
-                            "admin_user_created",
-                            f"Created user {user_id}"
-                        )
-                        st.success("User added successfully.")
-                        st.rerun()
-                    except Exception as error:
-                        if connection:
-                            connection.rollback()
-                        st.error(friendlyDatabaseError(error))
-                    finally:
-                        if cursor:
-                            cursor.close()
-                        if connection:
-                            connection.close()
-
     with crop_tab:
-        st.subheader("Manage crops")
-        st.caption("Inactive crops remain in past records but cannot be selected for new entries.")
-        crops = selectData("SELECT cropID, cropName, isActive FROM Crops ORDER BY cropName")
-        if not crops.empty:
-            displayCrops = crops.copy()
-            displayCrops["Status"] = displayCrops["isActive"].map(
-                {1: "Active", 0: "Inactive", True: "Active", False: "Inactive"}
-            )
-            showTable(
-                displayCrops[["cropID", "cropName", "Status"]].rename(
-                    columns={"cropID": "Crop ID", "cropName": "Crop"}
-                ), use_container_width=True, hide_index=True
-            )
-
         if "adminCropMessage" in st.session_state:
             st.success(st.session_state.pop("adminCropMessage"))
 
-        with st.form("admin_add_crop"):
-            crop_name = st.text_input("New crop name")
-            submitted = st.form_submit_button("Add crop")
-        if submitted:
-            name = crop_name.strip()
-            if not name or len(name) > 100:
-                st.warning("Enter a crop name of 1-100 characters.")
-            elif changeData(
-                "INSERT INTO Crops (cropName, isActive) VALUES (%s, 1)", (name,)
-            ):
-                logActivity(current_user["userID"], "admin_crop_created", f"Added crop {name}")
-                st.session_state["adminCropMessage"] = "Crop added successfully."
-                st.rerun()
+        crops = selectData("SELECT cropID, cropName, isActive FROM Crops ORDER BY cropName")
+        if referenceHead(
+            "crop", "Crops", len(crops),
+            "Inactive crops stay in past records but can't be picked for new entries.",
+            "Add crop"
+        ):
+            addCropDialog(current_user)
 
-        if not crops.empty:
-            cropOptions = {
-                f"{row['cropName']} (ID {int(row['cropID'])})": int(row['cropID'])
-                for _, row in crops.iterrows()
-            }
-            chosen = st.selectbox("Existing crop", list(cropOptions), key="admin_crop_choice")
-            selectedCrop = crops[crops["cropID"] == cropOptions[chosen]].iloc[0]
-            with st.form(f"admin_edit_crop_{cropOptions[chosen]}"):
-                updatedName = st.text_input("Edit crop name", value=str(selectedCrop["cropName"]))
-                activeLabel = st.selectbox(
-                    "Crop status", ["Active", "Inactive"],
-                    index=0 if bool(selectedCrop["isActive"]) else 1
-                )
-                editSubmitted = st.form_submit_button("Save crop changes")
-            if editSubmitted:
-                success, message = changeReferenceCrop(
-                    cropOptions[chosen], updatedName, activeLabel == "Active",
-                    current_user["userID"]
-                )
-                if success:
-                    st.session_state["adminCropMessage"] = message
-                    st.rerun()
-                else:
-                    st.warning(message)
+        if crops.empty:
+            st.info("No crops yet.")
+        else:
+            with st.container(key="adm_reflist_crop", gap=None):
+                for crop in crops.itertuples(index=False):
+                    cropID = int(crop.cropID)
+                    with st.container(horizontal=True, vertical_alignment="center", key=f"adm_urow_crop_{cropID}"):
+                        st.markdown(
+                            referenceRowHtml(crop.cropName, f"Crop #{cropID}", isActiveFlag(crop.isActive)),
+                            unsafe_allow_html=True
+                        )
+                        if st.button("Edit", key=f"adm_edit_crop_{cropID}", icon=":material/edit:"):
+                            editCropDialog(crop, current_user)
 
     with market_tab:
-        st.subheader("Manage markets")
-        st.caption("Inactive markets remain in earlier requests but cannot be chosen for new requests.")
-        markets = selectData(
-            "SELECT marketID, marketName, location, isActive FROM Markets ORDER BY marketName"
-        )
-        if not markets.empty:
-            displayMarkets = markets.copy()
-            displayMarkets["Status"] = displayMarkets["isActive"].map(
-                {1: "Active", 0: "Inactive", True: "Active", False: "Inactive"}
-            )
-            showTable(
-                displayMarkets[["marketID", "marketName", "location", "Status"]].rename(
-                    columns={"marketID": "Market ID", "marketName": "Market", "location": "Location"}
-                ), use_container_width=True, hide_index=True
-            )
-
         if "adminMarketMessage" in st.session_state:
             st.success(st.session_state.pop("adminMarketMessage"))
 
-        with st.form("admin_add_market"):
-            market_name = st.text_input("New market name")
-            market_location = st.text_input("New market location")
-            submitted = st.form_submit_button("Add market")
-        if submitted:
-            name = market_name.strip()
-            place = market_location.strip()
-            if not name or len(name) > 100 or not place or len(place) > 255:
-                st.warning("Enter a market name (1-100) and location (1-255).")
-            elif changeData(
-                "INSERT INTO Markets (marketName, location, isActive) VALUES (%s, %s, 1)",
-                (name, place)
-            ):
-                logActivity(current_user["userID"], "admin_market_created", f"Added market {name}")
-                st.session_state["adminMarketMessage"] = "Market added successfully."
-                st.rerun()
+        markets = selectData(
+            "SELECT marketID, marketName, location, isActive FROM Markets ORDER BY marketName"
+        )
+        if referenceHead(
+            "market", "Markets", len(markets),
+            "Inactive markets stay on earlier requests but can't be chosen for new ones.",
+            "Add market"
+        ):
+            addMarketDialog(current_user)
 
-        if not markets.empty:
-            marketOptions = {
-                f"{row['marketName']} (ID {int(row['marketID'])})": int(row['marketID'])
-                for _, row in markets.iterrows()
-            }
-            chosen = st.selectbox("Existing market", list(marketOptions), key="admin_market_choice")
-            selectedMarket = markets[markets["marketID"] == marketOptions[chosen]].iloc[0]
-            with st.form(f"admin_edit_market_{marketOptions[chosen]}"):
-                updatedName = st.text_input("Edit market name", value=str(selectedMarket["marketName"]))
-                updatedLocation = st.text_input("Edit market location", value=str(selectedMarket["location"]))
-                activeLabel = st.selectbox(
-                    "Market status", ["Active", "Inactive"],
-                    index=0 if bool(selectedMarket["isActive"]) else 1
-                )
-                editSubmitted = st.form_submit_button("Save market changes")
-            if editSubmitted:
-                success, message = changeReferenceMarket(
-                    marketOptions[chosen], updatedName, updatedLocation,
-                    activeLabel == "Active", current_user["userID"]
-                )
-                if success:
-                    st.session_state["adminMarketMessage"] = message
-                    st.rerun()
-                else:
-                    st.warning(message)
+        if markets.empty:
+            st.info("No markets yet.")
+        else:
+            with st.container(key="adm_reflist_market", gap=None):
+                for market in markets.itertuples(index=False):
+                    marketID = int(market.marketID)
+                    with st.container(horizontal=True, vertical_alignment="center", key=f"adm_urow_market_{marketID}"):
+                        st.markdown(
+                            referenceRowHtml(
+                                market.marketName,
+                                f"{market.location} · Market #{marketID}",
+                                isActiveFlag(market.isActive)
+                            ),
+                            unsafe_allow_html=True
+                        )
+                        if st.button("Edit", key=f"adm_edit_market_{marketID}", icon=":material/edit:"):
+                            editMarketDialog(market, current_user)
 
     with unit_tab:
-        st.subheader("Manage units")
-        st.caption("Inactive units stay in older records, but cannot be selected for new entries.")
-        unitData = selectData(
-            "SELECT unitName, isActive FROM Units ORDER BY unitName"
-        )
-        if not unitData.empty:
-            displayUnits = unitData.copy()
-            displayUnits["Status"] = displayUnits["isActive"].map(
-                {1: "Active", 0: "Inactive", True: "Active", False: "Inactive"}
-            )
-            showTable(
-                displayUnits[["unitName", "Status"]].rename(
-                    columns={"unitName": "Unit"}
-                ),
-                use_container_width=True, hide_index=True
-            )
-
-        with st.form("admin_add_unit"):
-            newUnit = st.text_input("New unit", placeholder="e.g. crate")
-            addUnitSubmitted = st.form_submit_button("Add unit")
-        if addUnitSubmitted:
-            success, message = addReferenceUnit(newUnit, current_user["userID"])
-            if success:
-                st.session_state["adminUnitMessage"] = message
-                st.rerun()
-            else:
-                st.warning(message)
-
         if "adminUnitMessage" in st.session_state:
             st.success(st.session_state.pop("adminUnitMessage"))
 
-        if not unitData.empty:
-            with st.form("admin_change_unit_status"):
-                chosenUnit = st.selectbox(
-                    "Existing unit", unitData["unitName"].astype(str).tolist()
-                )
-                currentlyActive = bool(
-                    unitData.loc[unitData["unitName"] == chosenUnit, "isActive"].iloc[0]
-                )
-                desiredStatus = st.selectbox(
-                    "Change to", ["Inactive", "Active"],
-                    index=0 if currentlyActive else 1
-                )
-                statusSubmitted = st.form_submit_button("Save unit status")
-            if statusSubmitted:
-                success, message = setReferenceUnitActive(
-                    chosenUnit, desiredStatus == "Active", current_user["userID"]
-                )
-                if success:
-                    st.session_state["adminUnitMessage"] = message
-                    st.rerun()
-                else:
-                    st.warning(message)
+        unitData = selectData(
+            "SELECT unitName, isActive FROM Units ORDER BY unitName"
+        )
+        if referenceHead(
+            "unit", "Units", len(unitData),
+            "Inactive units stay in older records but can't be picked for new entries.",
+            "Add unit"
+        ):
+            addUnitDialog(current_user)
+
+        if unitData.empty:
+            st.info("No units yet.")
+        else:
+            with st.container(key="adm_reflist_unit", gap=None):
+                for index, unit in enumerate(unitData.itertuples(index=False)):
+                    with st.container(horizontal=True, vertical_alignment="center", key=f"adm_urow_unit_{index}"):
+                        st.markdown(
+                            referenceRowHtml(
+                                unit.unitName,
+                                UNIT_NAMES.get(str(unit.unitName).lower(), "Custom unit"),
+                                isActiveFlag(unit.isActive)
+                            ),
+                            unsafe_allow_html=True
+                        )
+                        if st.button("Change status", key=f"adm_edit_unit_{index}", icon=":material/toggle_on:"):
+                            editUnitDialog(unit, current_user)
+
+
+RECORD_TYPES = {
+    "Farms": ("Farms", "Every farm and where it is."),
+    "Farm ownership": ("Farm owners", "Which farmer owns each farm."),
+    "CropCycle": ("Crop cycles", "What each farm is growing, and when it expects to harvest."),
+    "HarvestLots": ("Harvest lots", "Each harvested batch, with its amount and sell-by date."),
+    "MarketRequests": ("Requests", "Produce that market buyers have asked for."),
+    "Allocations": ("Allocations", "Stock that farmers have reserved against requests."),
+    "StockMovements": ("Stock movements", "Every change to lot stock: harvests, reservations, deliveries and losses."),
+    "DeliveryReceipts": ("Deliveries", "Deliveries confirmed by buyers, with any shortfall."),
+    "Request status history": ("Request history", "Each time a request changed status."),
+    "Security activity": ("Activity log", "Sign-ins, denied access and admin changes."),
+}
+
+RECORD_COLUMNS = {
+    "farmID": "Farm #", "farmName": "Farm", "location": "Location", "ownedBy": "Owner",
+    "cycleID": "Cycle #", "cropID": "Crop #", "expectedUnit": "Unit", "expectedYield": "Expected yield",
+    "expectedHarvestDate": "Expected harvest", "status": "Status",
+    "lotID": "Lot #", "quantityHarvested": "Harvested", "unit": "Unit",
+    "harvestDate": "Harvested on", "sellByDate": "Sell by",
+    "requestID": "Request #", "marketID": "Market #", "quantityRequested": "Requested",
+    "requestDate": "Requested on", "reqStatus": "Status", "requestedBy": "Requested by",
+    "allocationID": "Allocation #", "quantityAllocated": "Allocated", "allocationDate": "Allocated on",
+    "allocStatus": "Status", "allocatedByName": "Allocated by",
+    "movementID": "Movement #", "movementType": "Type", "quantity": "Quantity",
+    "dateOccurred": "Date", "reason": "Reason", "performedByName": "Performed by",
+    "receiptID": "Receipt #", "expectedQuantity": "Expected", "receivedQuantity": "Received",
+    "discrepancyQuantity": "Short by", "deliveryDate": "Delivered on", "confirmedByName": "Confirmed by",
+    "historyID": "History #", "oldStatus": "From", "newStatus": "To", "changedAt": "Changed on",
+    "changedByName": "Changed by", "activityID": "Activity #", "actionType": "Activity",
+    "actionDate": "When", "details": "Details",
+}
+
+RECORD_PERSON_IDS = ["userID", "allocatedBy", "performedBy", "confirmedBy", "changedBy"]
+RECORD_DATES = {"expectedHarvestDate", "harvestDate", "sellByDate"}
+RECORD_DATETIMES = {"requestDate", "allocationDate", "dateOccurred", "deliveryDate", "changedAt", "actionDate"}
+
+MOVEMENT_LABELS = {
+    "added": "Harvest added",
+    "reserved": "Reserved",
+    "delivered": "Delivered",
+    "canceled": "Released",
+    "loss": "Loss",
+    "correction_added": "Correction",
+}
+
+
+def readableRecords(table, records):
+    records = records.copy()
+    personColumns = [
+        column for column in RECORD_PERSON_IDS
+        if column in records.columns
+        and any(name in records.columns for name in ("requestedBy", "allocatedByName", "performedByName",
+                                                     "confirmedByName", "changedByName"))
+    ]
+    records = records.drop(columns=personColumns)
+
+    def formatDates(column, pattern):
+        parsed = pd.to_datetime(records[column], errors="coerce")
+        records[column] = [
+            None if pd.isna(value) else f"{value.day} {value.strftime(pattern)}" for value in parsed
+        ]
+
+    for column in records.columns:
+        if column in RECORD_DATES:
+            formatDates(column, "%b %Y")
+        elif column in RECORD_DATETIMES:
+            formatDates(column, "%b %Y, %H:%M")
+
+    if "status" in records.columns:
+        activeText = "Growing" if table == "CropCycle" else "Active"
+        inactiveText = "Finished" if table == "CropCycle" else "Inactive"
+        records["status"] = records["status"].map(
+            lambda value: activeText if isActiveFlag(value) else inactiveText
+        )
+    for column in ("reqStatus", "oldStatus", "newStatus"):
+        if column in records.columns:
+            records[column] = records[column].map(
+                lambda value: value if value is None or pd.isna(value)
+                else REQUEST_STATUS_LABELS.get(str(value), (str(value),))[0]
+            )
+    if "allocStatus" in records.columns:
+        records["allocStatus"] = records["allocStatus"].map(
+            lambda value: ALLOCATION_STATUS.get(str(value), (str(value),))[0]
+        )
+    if "movementType" in records.columns:
+        records["movementType"] = records["movementType"].map(
+            lambda value: MOVEMENT_LABELS.get(str(value), str(value).replace("_", " ").capitalize())
+        )
+    if "actionType" in records.columns:
+        records["actionType"] = records["actionType"].map(activityLabel)
+
+    return records.rename(columns=RECORD_COLUMNS)
+
+
+def keepRecordType():
+    if st.session_state.get("adm_rec_type") is None:
+        st.session_state["adm_rec_type"] = st.session_state.get("adm_rec_type_last", "Farms")
+    st.session_state["adm_rec_type_last"] = st.session_state["adm_rec_type"]
+
 
 def showAdminOperations(current_user):
-    st.header("Operational records")
+    st.header("Records")
 
     if current_user["role"] != "admin":
         denyAccess(current_user, "Attempted to open administrator operational records")
         return
 
-    table = st.selectbox(
+    table = st.pills(
         "Record type",
-        [
-            "Farms",
-            "Farm ownership",
-            "CropCycle",
-            "HarvestLots",
-            "MarketRequests",
-            "Allocations",
-            "StockMovements",
-            "DeliveryReceipts",
-            "Request status history",
-            "Security activity",
-        ],
-    )
+        list(RECORD_TYPES),
+        format_func=lambda key: RECORD_TYPES[key][0],
+        default="Farms",
+        key="adm_rec_type",
+        on_change=keepRecordType,
+        label_visibility="collapsed"
+    ) or "Farms"
 
     allowed_queries = {
         "Farms": "SELECT * FROM Farms ORDER BY farmID DESC",
@@ -6286,11 +6796,19 @@ def showAdminOperations(current_user):
                               ORDER BY al.actionDate DESC""",
     }
 
+    from html import escape
+
     records = selectData(allowed_queries[table])
+    label, note = RECORD_TYPES[table]
+    st.markdown(
+        f'<div class="hl-ref-head hl-rec-head"><strong>{escape(label)} ({len(records)})</strong>'
+        f'<span>{escape(note)} Read-only.</span></div>',
+        unsafe_allow_html=True
+    )
     if records.empty:
-        st.info("There are no records in this table.")
+        st.info("There are no records of this type yet.")
     else:
-        showTable(records, use_container_width=True, hide_index=True)
+        showTable(readableRecords(table, records), use_container_width=True, hide_index=True)
 
 
 # -----------------------------------------------------------------------------
