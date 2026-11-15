@@ -6,3 +6,6 @@ PyMySQL
 Pillow
 google-genai
 argon2-cffi
+langchain
+langchain-google-genai
+sqlglot
