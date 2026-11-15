@@ -1458,8 +1458,8 @@ def showDashboard(current_user):
 
         titleCol, viewCol = st.columns([0.7, 0.3], vertical_alignment="bottom")
         with titleCol:
-            st.subheader("Stock by crop")
-            st.caption("Lots of the same crop and unit are added together.")
+            st.subheader("Available produce")
+            st.caption("Your current harvest inventory, grouped by crop and unit.")
         with viewCol:
             stockView = st.segmented_control(
                 "Stock view",
