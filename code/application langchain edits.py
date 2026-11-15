@@ -1329,6 +1329,41 @@ def showNeedsAttention(expiringLots, openRequests):
                     )
 
 
+def showUpcomingHarvests(expected, limit=6):
+    from html import escape
+
+    rows = []
+    for cycle in expected.head(limit).itertuples(index=False):
+        harvestDate = pd.to_datetime(cycle.expectedHarvestDate, errors="coerce")
+        if pd.isna(harvestDate):
+            dayText, monthText, whenText, tone = "—", "", "No date set", ""
+        else:
+            days = (harvestDate.date() - date.today()).days
+            dayText, monthText = str(harvestDate.day), harvestDate.strftime("%b")
+            if days < 0:
+                whenText, tone = f"{-days} day{'s' if days != -1 else ''} overdue", " hl-attn-pill-warn"
+            elif days == 0:
+                whenText, tone = "Today", " hl-attn-pill-warn"
+            elif days == 1:
+                whenText, tone = "Tomorrow", ""
+            else:
+                whenText, tone = f"In {days} days", ""
+
+        rows.append(
+            f'<li><span class="hl-harvest-date"><b>{dayText}</b><small>{monthText}</small></span>'
+            f'<span class="hl-attn-main"><b>{escape(str(cycle.cropName))}</b> · {escape(formatQuantity(cycle.expectedYield, cycle.expectedUnit))} expected'
+            f'<small>{escape(str(cycle.farmName))} · Crop cycle #{cycle.cycleID}</small></span>'
+            f'<span class="hl-attn-pill{tone}">{whenText}</span></li>'
+        )
+
+    more = len(expected) - limit
+    moreHtml = f'<p class="hl-harvest-more">+ {more} more on the Farms page</p>' if more > 0 else ""
+    st.markdown(
+        f'<div class="hl-harvests"><ul class="hl-attn-list">{"".join(rows)}</ul>{moreHtml}</div>',
+        unsafe_allow_html=True
+    )
+
+
 def goToPage(page):
     st.session_state["hl_nav_farmer"] = page
 
@@ -1496,48 +1531,34 @@ def showDashboard(current_user):
         if stockView != "Table":
             showProduceCards(cropTotals, available, cropImages)
 
-        st.subheader("Harvested inventory")
-
         def lotAmounts(column):
             return [formatQuantity(q, u) for q, u in zip(available[column], available["unit"])]
 
-        showTable(
-            pd.DataFrame({
-                "Lot #": available["lotID"],
-                "Farm": available["farmName"],
-                "Location": available["location"],
-                "Crop": available["cropName"],
-                "Harvested": lotAmounts("quantityHarvested"),
-                "Harvest date": available["harvestDate"],
-                "Sell-by date": available["sellByDate"],
-                "In stock": lotAmounts("stockOnHand"),
-                "Reserved": lotAmounts("reservedQuantity"),
-                "Available": lotAmounts("availableQuantity"),
-            }),
-            width="stretch",
-            hide_index=True
-        )
+        with st.expander("View detailed inventory", icon=":material/inventory_2:"):
+            showTable(
+                pd.DataFrame({
+                    "Lot #": available["lotID"],
+                    "Farm": available["farmName"],
+                    "Location": available["location"],
+                    "Crop": available["cropName"],
+                    "Harvested": lotAmounts("quantityHarvested"),
+                    "Harvest date": available["harvestDate"],
+                    "Sell-by date": available["sellByDate"],
+                    "In stock": lotAmounts("stockOnHand"),
+                    "Reserved": lotAmounts("reservedQuantity"),
+                    "Available": lotAmounts("availableQuantity"),
+                }),
+                width="stretch",
+                hide_index=True
+            )
 
-    st.subheader("Expected harvest forecasts")
+    st.subheader("Upcoming harvests")
 
     if expected.empty:
         st.info("No expected harvests have been entered.")
 
     else:
-        showTable(
-            pd.DataFrame({
-                "Crop cycle #": expected["cycleID"],
-                "Farm": expected["farmName"],
-                "Crop": expected["cropName"],
-                "Expected yield": [
-                    formatQuantity(q, u)
-                    for q, u in zip(expected["expectedYield"], expected["expectedUnit"])
-                ],
-                "Expected harvest date": expected["expectedHarvestDate"],
-            }),
-            width="stretch",
-            hide_index=True
-        )
+        showUpcomingHarvests(expected)
 
 def createProduceRequest(
     current_user,
