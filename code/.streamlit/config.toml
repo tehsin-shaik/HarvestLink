@@ -1,0 +1,12 @@
+[theme]
+base = "light"
+primaryColor = "#2f6b47"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#eef2e8"
+textColor = "#1c1a17"
+font = "Geist:https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap"
+headingFont = "Cormorant Garamond:https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,500;1,600&display=swap"
+baseRadius = "0.75rem"
+
+[client]
+toolbarMode = "minimal"
