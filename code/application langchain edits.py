@@ -6271,7 +6271,7 @@ Results:
 
     return getLangChainText(response).strip()
 
-SPROUT_SUGGESTIONS = {
+FITTON_SUGGESTIONS = {
     "farmer": [
         "Which crops are currently available?",
         "Which harvest lots have no available stock?",
@@ -6293,10 +6293,29 @@ SPROUT_SUGGESTIONS = {
     ],
 }
 
-SPROUT_AVATAR = ":material/eco:"
+# A fittonia (nerve plant) leaf: pale veins over a green leaf.
+FITTON_LEAF = (
+    '<path d="M12 2.6C17.6 5.1 20.1 9.6 19.1 14.6c-.9 4.3-4.2 6.7-7.1 6.9-2.9-.2-6.2-2.6-7.1-6.9C3.9 9.6 6.4 5.1 12 2.6z" '
+    'fill="#9cc46a"/>'
+    '<path d="M12 5.2V21M12 9 8.3 6.9M12 9l3.7-2.1M12 12.6 6.6 10M12 12.6l5.4-2.6M12 16.2l-5.3-2M12 16.2l5.3-2'
+    'M8.3 6.9 6.6 10l.1 4.2M15.7 6.9l1.7 3.1-.1 4.2M9.4 11.4l.1 3.6M14.6 11.4l-.1 3.6" '
+    'fill="none" stroke="#f5f3ea" stroke-width="1.05" stroke-linecap="round" stroke-linejoin="round"/>'
+)
 
 
-def answerSproutQuestion(question, current_user, onStep=lambda label: None):
+def fittonIcon(size=24, tile=False):
+    background = '<rect width="24" height="24" rx="6.5" fill="#2f6b47"/>' if tile else ""
+    leaf = f'<g transform="translate(2.4 2.2) scale(.8)">{FITTON_LEAF}</g>' if tile else FITTON_LEAF
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="{size}" height="{size}" '
+        f'aria-hidden="true">{background}{leaf}</svg>'
+    )
+
+
+FITTON_AVATAR = fittonIcon(64, tile=True)
+
+
+def answerFittonQuestion(question, current_user, onStep=lambda label: None):
     # Runs the same checks as before and returns the reply instead of drawing it.
     def reply(kind, text, results=None, sql=None):
         return {"role": "assistant", "kind": kind, "text": text, "results": results, "sql": sql}
@@ -6376,22 +6395,22 @@ def answerSproutQuestion(question, current_user, onStep=lambda label: None):
         return reply("error", "The assistant could not answer this question right now.")
 
 
-def showSproutMessage(message, key):
+def showFittonMessage(message, key):
     from html import escape
 
     if message["role"] == "user":
         with st.chat_message("user"):
             st.markdown(
-                f'<div class="hl-sprout-question">{escape(message["text"])}</div>',
+                f'<div class="hl-fitton-question">{escape(message["text"])}</div>',
                 unsafe_allow_html=True
             )
         return
 
-    with st.chat_message("assistant", avatar=SPROUT_AVATAR):
+    with st.chat_message("assistant", avatar=FITTON_AVATAR):
         if message["kind"] in ("blocked", "error", "note"):
             icon = {"blocked": "lock", "error": "error", "note": "info"}[message["kind"]]
             st.markdown(
-                f'<div class="hl-sprout-note hl-sprout-note-{message["kind"]}">'
+                f'<div class="hl-fitton-note hl-fitton-note-{message["kind"]}">'
                 f'<span class="material-symbols-rounded" aria-hidden="true">{icon}</span>'
                 f'<span>{escape(message["text"])}</span></div>',
                 unsafe_allow_html=True
@@ -6423,21 +6442,20 @@ def showSproutMessage(message, key):
             st.code(message["sql"], language="sql")
 
 
-def askSprout(question):
-    st.session_state["sprout_pending"] = question
+def askFitton(question):
+    st.session_state["fitton_pending"] = question
 
 
 def showAssistant(current_user):
     from html import escape
 
-    history = st.session_state.setdefault("sprout_chat", [])
+    history = st.session_state.setdefault("fitton_chat", [])
 
     titleCol, actionCol = st.columns([0.75, 0.25], vertical_alignment="center")
     with titleCol:
         st.markdown(
-            '<div class="hl-sprout-head"><span class="hl-sprout-logo">'
-            '<span class="material-symbols-rounded" aria-hidden="true">eco</span></span>'
-            '<div><h1>Sprout AI</h1><span class="hl-sprout-badge">'
+            f'<div class="hl-fitton-head"><span class="hl-fitton-logo">{fittonIcon(32)}</span>'
+            '<div><h1>FittonAI</h1><span class="hl-fitton-badge">'
             '<span class="material-symbols-rounded" aria-hidden="true">lock</span>'
             'Read-only · only sees records you\'re allowed to see</span></div></div>',
             unsafe_allow_html=True
@@ -6447,16 +6465,16 @@ def showAssistant(current_user):
             if history and st.button(
                 "New chat",
                 icon=":material/add_comment:",
-                key="sprout_new_chat"
+                key="fitton_new_chat"
             ):
                 history.clear()
                 st.rerun()
 
     question = st.chat_input(
-        "Ask Sprout about your crops, stock, requests or deliveries",
-        key="sprout_input"
+        "Ask FittonAI about your crops, stock, requests or deliveries",
+        key="fitton_input"
     )
-    question = question or st.session_state.pop("sprout_pending", None)
+    question = question or st.session_state.pop("fitton_pending", None)
 
     # Queue the question first so a new one sent mid-answer is not lost.
     if question:
@@ -6465,42 +6483,42 @@ def showAssistant(current_user):
     if not history:
         firstName = str(current_user.get("fname") or current_user["fullname"]).split()[0]
         st.markdown(
-            f'<div class="hl-sprout-welcome"><span class="hl-sprout-eyebrow">Your farm assistant</span>'
+            f'<div class="hl-fitton-welcome"><span class="hl-fitton-eyebrow">Your farm assistant</span>'
             f'<h2>Hi {escape(firstName)}, what would you like to know?</h2>'
-            '<p>Ask a question in plain words. Sprout looks up the answer in HarvestLink '
+            '<p>Ask a question in plain words. FittonAI looks up the answer in HarvestLink '
             'and shows the records and query it used.</p></div>',
             unsafe_allow_html=True
         )
-        suggestions = SPROUT_SUGGESTIONS.get(current_user["role"], SPROUT_SUGGESTIONS["user"])
-        with st.container(key="sprout_chips", horizontal=True, horizontal_alignment="center"):
+        suggestions = FITTON_SUGGESTIONS.get(current_user["role"], FITTON_SUGGESTIONS["user"])
+        with st.container(key="fitton_chips", horizontal=True, horizontal_alignment="center"):
             for index, suggestion in enumerate(suggestions):
                 st.button(
                     suggestion,
-                    key=f"sprout_chip_{index}",
-                    on_click=askSprout,
+                    key=f"fitton_chip_{index}",
+                    on_click=askFitton,
                     args=(suggestion,)
                 )
         return
 
     for index, message in enumerate(history):
-        showSproutMessage(message, f"sprout_msg_{index}")
+        showFittonMessage(message, f"fitton_msg_{index}")
 
         answered = index + 1 < len(history) and history[index + 1]["role"] == "assistant"
         if message["role"] != "user" or answered:
             continue
 
-        with st.chat_message("assistant", avatar=SPROUT_AVATAR):
+        with st.chat_message("assistant", avatar=FITTON_AVATAR):
             progress = st.empty()
 
             def showStep(label):
                 progress.markdown(
-                    f'<div class="hl-sprout-thinking"><span class="hl-sprout-dots">'
+                    f'<div class="hl-fitton-thinking"><span class="hl-fitton-dots">'
                     f'<i></i><i></i><i></i></span>{escape(label)}…</div>',
                     unsafe_allow_html=True
                 )
 
             showStep("Checking your question")
-            reply = answerSproutQuestion(message["text"], current_user, showStep)
+            reply = answerFittonQuestion(message["text"], current_user, showStep)
             progress.empty()
 
         history.insert(index + 1, reply)
@@ -6569,7 +6587,7 @@ def main():
         "Search produce": "Shop",
         "User management": "Users",
         "Operational records": "Records",
-        "Assistant": "Sprout AI",
+        "Assistant": "FittonAI",
     }
 
     # Reject an invalid or unknown role
@@ -6645,8 +6663,8 @@ def main():
         st.session_state.currentUser = None
         st.session_state.pop("sessionStartedAt", None)
         st.session_state.pop("selectedProduceLot", None)
-        st.session_state.pop("sprout_chat", None)
-        st.session_state.pop("sprout_pending", None)
+        st.session_state.pop("fitton_chat", None)
+        st.session_state.pop("fitton_pending", None)
         st.session_state.signedOutMessage = True
         st.rerun()
 
