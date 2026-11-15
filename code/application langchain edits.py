@@ -3878,6 +3878,227 @@ def finishCropCycle(cycleID, userID):
         if connection:
             connection.close()
             
+def farmerMatchingStock(userID):
+    lots = selectData(
+        """SELECT hl.lotID, cc.cropID, hl.unit
+           FROM HarvestLots hl, CropCycle cc, OwnedBy o
+           WHERE hl.cycleID = cc.cycleID AND cc.farmID = o.farmID AND o.userID = %s
+           AND hl.status = 1 AND hl.harvestDate <= %s
+           AND (hl.sellByDate IS NULL OR hl.sellByDate >= %s)""",
+        (userID, date.today(), date.today())
+    )
+    totals = {}
+    for lot in lots.itertuples(index=False):
+        availableQuantity = calculateLotAvailability(int(lot.lotID))[2]
+        if availableQuantity is not None and float(availableQuantity) > 0:
+            key = (int(lot.cropID), str(lot.unit))
+            totals[key] = totals.get(key, 0.0) + float(availableQuantity)
+    return totals
+
+
+def selectAllocRequest(requestID):
+    st.session_state["alloc_request"] = requestID
+
+
+def showRequestCards(requests, userID, selectedID):
+    from html import escape
+
+    cropImages = selectData(
+        """SELECT hi.lotID, c.cropName, hi.imageName
+           FROM HarvestLotImages hi
+           JOIN HarvestLots hl ON hi.lotID = hl.lotID
+           JOIN CropCycle cc ON hl.cycleID = cc.cycleID
+           JOIN Crops c ON cc.cropID = c.cropID
+           LEFT JOIN OwnedBy o ON o.farmID = cc.farmID AND o.userID = %s
+           ORDER BY (o.userID IS NULL), hl.harvestDate DESC, hi.imageNumber""",
+        (userID,)
+    )
+
+    rows = list(requests.itertuples(index=False))
+    for start in range(0, len(rows), 4):
+        columns = st.columns(4)
+        for column, row in zip(columns, rows[start:start + 4]):
+            showRequestCard(column, row, cropImages, selectedID)
+
+
+def showRequestCard(column, row, cropImages, selectedID):
+    from html import escape
+
+    cropName = str(row.cropName)
+    unit = str(row.unit)
+    imageData = produceImageData([], cropName, cropImages)
+    if imageData:
+        photo = f'<img src="data:image/jpeg;base64,{imageData}" alt="{escape(cropName)}">'
+    else:
+        photo = f'<span class="hl-produce-initial">{escape(cropName[:1])}</span>'
+
+    requested = float(row.quantityRequested)
+    received = float(row.quantityReceived)
+    reserved = float(row.outstandingReserved)
+    remaining = float(row.quantityRemaining)
+    canOffer = float(row.canOffer)
+    receivedPercent = max(0, min(100, received / requested * 100 if requested > 0 else 0))
+    reservedPercent = max(0, min(100 - receivedPercent, reserved / requested * 100 if requested > 0 else 0))
+
+    if canOffer >= remaining:
+        tag = '<span class="hl-produce-tag hl-req-tag-good">You can fill this</span>'
+    elif canOffer > 0:
+        tag = f'<span class="hl-produce-tag">You can fill {escape(formatQuantity(canOffer, unit))}</span>'
+    else:
+        tag = '<span class="hl-produce-tag hl-req-tag-none">No matching stock</span>'
+
+    requestDate = pd.to_datetime(row.requestDate, errors="coerce")
+    dateText = "—" if pd.isna(requestDate) else f"{requestDate.day} {requestDate.strftime('%b %Y')}"
+    statusText = "Part filled" if str(row.status) == "partiallyFulfilled" else "Pending"
+
+    card = (
+        f'<article class="hl-produce hl-req"><div class="hl-produce-photo">{photo}{tag}</div>'
+        f'<div class="hl-produce-body"><div class="hl-produce-head"><span class="hl-produce-name">{escape(cropName)}</span>'
+        f'<span class="hl-produce-meta">Request #{int(row.requestID)} · {statusText}</span></div>'
+        f'<div class="hl-produce-available"><b>{escape(formatQuantity(remaining, unit))}</b> still needed '
+        f'of {escape(formatQuantity(requested, unit))}</div>'
+        f'<div class="hl-produce-bar" title="Received and reserved so far">'
+        f'<span class="hl-bar-available" style="width:{receivedPercent:.1f}%"></span>'
+        f'<span class="hl-bar-reserved" style="width:{reservedPercent:.1f}%"></span></div>'
+        f'<div class="hl-produce-legend"><span><i class="hl-dot-available"></i>{escape(formatQuantity(received, unit))} received</span>'
+        f'<span><i class="hl-dot-reserved"></i>{escape(formatQuantity(reserved, unit))} reserved</span></div>'
+        f'<div class="hl-produce-foot hl-req-foot">'
+        f'<span><span class="material-symbols-rounded" aria-hidden="true">storefront</span>'
+        f'{escape(str(row.marketName))} · {escape(str(row.marketLocation))}</span>'
+        f'<span><span class="material-symbols-rounded" aria-hidden="true">person</span>'
+        f'{escape(str(row.requestedBy))} · {dateText}</span></div></div></article>'
+    )
+
+    requestID = int(row.requestID)
+    selected = requestID == selectedID
+    with column, st.container(key=f"req_card_{requestID}"):
+        st.markdown(card.replace('class="hl-produce hl-req"',
+            f'class="hl-produce hl-req{" hl-req-selected" if selected else ""}"'), unsafe_allow_html=True)
+        st.button(
+            "Selected" if selected else ("Allocate stock" if canOffer > 0 else "View request"),
+            key=f"req_pick_{requestID}",
+            icon=":material/check:" if selected else ":material/inventory:",
+            type="primary" if selected else "secondary",
+            width="stretch",
+            on_click=selectAllocRequest,
+            args=(requestID,)
+        )
+
+
+ALLOCATION_STATUS = {
+    "reserved": ("Reserved", "hl-alloc-pill"),
+    "partiallyDelivered": ("Partly delivered", "hl-alloc-pill hl-alloc-pill-part"),
+    "delivered": ("Delivered", "hl-alloc-pill hl-alloc-pill-done"),
+    "canceled": ("Cancelled", "hl-alloc-pill hl-alloc-pill-off"),
+}
+
+
+def allocationRowHtml(row):
+    from html import escape
+
+    unit = str(row.unit)
+    allocated = pd.to_datetime(row.allocationDate, errors="coerce")
+    dayText, monthText = ("—", "") if pd.isna(allocated) else (str(allocated.day), allocated.strftime("%b").upper())
+    statusText, statusClass = ALLOCATION_STATUS.get(str(row.status), (str(row.status), "hl-alloc-pill"))
+    remainingText = ""
+    if str(row.status) in ("reserved", "partiallyDelivered"):
+        remainingText = f"<small>{escape(formatQuantity(float(row.reservedRemaining), unit))} still reserved</small>"
+    return (
+        f'<div class="hl-alloc-row"><div class="hl-alloc-date"><b>{dayText}</b><span>{monthText}</span></div>'
+        f'<div class="hl-alloc-main"><strong>{escape(str(row.cropName))} · '
+        f'{escape(formatQuantity(float(row.quantityAllocated), unit))}</strong>'
+        f'<small>{escape(str(row.marketName))} · for {escape(str(row.requestedBy))}</small>'
+        f'<small>Allocation #{int(row.allocationID)} · Request #{int(row.requestID)} · Lot #{int(row.lotID)}</small></div>'
+        f'<div class="hl-alloc-side"><span class="{statusClass}">{statusText}</span>{remainingText}</div></div>'
+    )
+
+
+def showReleaseControl(row, userID):
+    allocationID = int(row.allocationID)
+    unit = str(row.unit)
+    maximumCancellation = float(row.reservedRemaining)
+
+    with st.popover("Release", icon=":material/undo:"):
+        st.markdown(
+            f'<div class="hl-release-head"><strong>Release reserved stock</strong>'
+            f'<span>{formatQuantity(maximumCancellation, unit)} reserved on lot #{int(row.lotID)}. '
+            f'Released stock goes back to available.</span></div>',
+            unsafe_allow_html=True
+        )
+        with st.form(f"release_form_{allocationID}", clear_on_submit=True, border=False):
+            cancellationQuantity = st.number_input(
+                f"Amount to release ({unit})",
+                min_value=0.01,
+                max_value=maximumCancellation,
+                value=maximumCancellation,
+                key=f"release_qty_{allocationID}"
+            )
+            reason = st.text_input(
+                "Reason (optional)",
+                key=f"release_reason_{allocationID}"
+            )
+            cancelSubmitted = st.form_submit_button(
+                "Release to stock",
+                type="primary",
+                width="stretch"
+            )
+        if cancelSubmitted:
+            canceled, message = cancelReservedQuantity(
+                allocationID=allocationID,
+                cancellationQuantity=cancellationQuantity,
+                reason=reason,
+                userID=userID
+            )
+            if canceled:
+                st.session_state.allocationMessage = (
+                    f"Reservation canceled successfully. "
+                    f"{cancellationQuantity:,.2f} "
+                    f"{unit} was "
+                    f"returned to available stock."
+                )
+                st.rerun()
+            else:
+                st.warning(message)
+
+
+def showAllocationList(allocations, userID):
+    activeMask = allocations["status"].isin(["reserved", "partiallyDelivered"])
+    active = allocations[activeMask]
+    history = allocations[~activeMask]
+    activeTab, historyTab = st.tabs([f"Active ({len(active)})", f"History ({len(history)})"])
+
+    with activeTab:
+        if active.empty:
+            st.markdown(
+                '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+                'inventory_2</span>There are no active allocations.</div>',
+                unsafe_allow_html=True
+            )
+        else:
+            with st.container(key="alloc_active_list", gap=None):
+                for row in active.itertuples(index=False):
+                    with st.container(
+                        key=f"alloc_row_{int(row.allocationID)}",
+                        horizontal=True,
+                        vertical_alignment="center",
+                        gap="small"
+                    ):
+                        st.markdown(allocationRowHtml(row), unsafe_allow_html=True, width="stretch")
+                        if float(row.reservedRemaining) > 0:
+                            showReleaseControl(row, userID)
+
+    with historyTab:
+        if history.empty:
+            st.markdown(
+                '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+                'inventory_2</span>There are no past allocations.</div>',
+                unsafe_allow_html=True
+            )
+        else:
+            rows = "".join(allocationRowHtml(row) for row in history.itertuples(index=False))
+            st.markdown(f'<div class="hl-alloc-list">{rows}</div>', unsafe_allow_html=True)
+
+
 def showFarmerAllocations(current_user):
     st.header("Market requests and allocations")
 
@@ -3945,6 +4166,44 @@ def showFarmerAllocations(current_user):
         st.info("There are no open market requests.")
 
     else:
+        matchingStock = farmerMatchingStock(userID)
+        requests["canOffer"] = [
+            matchingStock.get((int(row.cropID), str(row.unit)), 0.0)
+            for row in requests.itertuples(index=False)
+        ]
+        fillable = requests[requests["canOffer"] > 0]
+
+        filterCol, viewCol = st.columns([0.6, 0.4], vertical_alignment="center")
+        with filterCol:
+            requestFilter = st.segmented_control(
+                "Show requests",
+                ["mine", "all"],
+                format_func=lambda option: (
+                    f"Ones I can fill ({len(fillable)})" if option == "mine"
+                    else f"All requests ({len(requests)})"
+                ),
+                default="mine" if len(fillable) else "all",
+                key="req_filter",
+                label_visibility="collapsed"
+            ) or "all"
+        with viewCol:
+            with st.container(horizontal=True, horizontal_alignment="right"):
+                requestView = st.segmented_control(
+                    "Request view",
+                    ["Cards", "Table"],
+                    default="Cards",
+                    key="req_view",
+                    label_visibility="collapsed"
+                ) or "Cards"
+
+        shownRequests = fillable if requestFilter == "mine" else requests
+
+        requestIDs = [int(value) for value in requests["requestID"]]
+        if st.session_state.get("alloc_request") not in requestIDs:
+            st.session_state["alloc_request"] = (
+                int(shownRequests["requestID"].iloc[0]) if not shownRequests.empty else requestIDs[0]
+            )
+
         displayedRequests = requests[
             [
                 "requestID",
@@ -3979,50 +4238,52 @@ def showFarmerAllocations(current_user):
             "Status"
         ]
 
-        showTable(
-            displayedRequests,
-            use_container_width=True,
-            hide_index=True
-        )
+        if shownRequests.empty:
+            st.markdown(
+                '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+                'inventory_2</span>None of the open requests match your available stock right now.</div>',
+                unsafe_allow_html=True
+            )
+        elif requestView == "Table":
+            showTable(
+                displayedRequests[displayedRequests["Request #"].isin(shownRequests["requestID"])],
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            showRequestCards(shownRequests, userID, st.session_state["alloc_request"])
 
-        requestRows = requests.index.tolist()
+        from html import escape
 
-        def showRequest(rowIndex):
-            request = requests.loc[rowIndex]
-
+        def showRequest(optionID):
+            request = requests[requests["requestID"] == optionID].iloc[0]
             return (
-                f"{request['requestedBy']} — "
-                f"{request['marketName']} — "
-                f"{request['cropName']} — "
-                f"{request['quantityRemaining']:,.2f} "
-                f"{request['unit']} remaining"
+                f"{request['cropName']} · Request #{optionID} · {request['marketName']} · "
+                f"{formatQuantity(float(request['quantityRemaining']), str(request['unit']))} needed"
             )
 
-        selectedRequestRow = st.selectbox(
+        st.selectbox(
             "Request to allocate",
-            requestRows,
-            format_func=showRequest
+            requestIDs,
+            format_func=showRequest,
+            key="alloc_request"
         )
-
-        selectedRequest = requests.loc[
-            selectedRequestRow
-        ]
-
+        selectedRequest = requests[
+            requests["requestID"] == st.session_state["alloc_request"]
+        ].iloc[0]
         requestID = int(
             selectedRequest["requestID"]
         )
-
         cropID = int(
             selectedRequest["cropID"]
         )
-
         requestUnit = str(
             selectedRequest["unit"]
         )
-
         requestRemaining = float(
             selectedRequest["quantityRemaining"]
         )
+        cropName = str(selectedRequest["cropName"])
 
         lots = selectData(
             """SELECT hl.lotID, f.farmName, c.cropName, hl.quantityHarvested, hl.unit, hl.harvestDate, hl.sellByDate
@@ -4066,76 +4327,96 @@ def showFarmerAllocations(current_user):
                 lots["availableQuantity"] > 0
             ]
 
-        if lots.empty:
-            st.warning(
-                "Your farm has no compatible available "
-                "lots for this request."
+        with st.container(key="alloc_panel"):
+            st.markdown(
+                f'<div class="hl-lotpanel-head"><div><span class="hl-lotpanel-eyebrow">Selected request</span>'
+                f'<h3>{escape(cropName)}</h3>'
+                f'<span class="hl-gallery-meta">Request #{requestID} · {escape(str(selectedRequest["marketName"]))}, '
+                f'{escape(str(selectedRequest["marketLocation"]))} · for {escape(str(selectedRequest["requestedBy"]))}</span></div>'
+                f'<span class="hl-gallery-count">{escape(formatQuantity(requestRemaining, requestUnit))} needed</span></div>',
+                unsafe_allow_html=True
             )
 
-        else:
-            lotRows = lots.index.tolist()
-
-            def showLot(rowIndex):
-                lot = lots.loc[rowIndex]
-
-                return (
-                    f"{lot['cropName']} — "
-                    f"{lot['availableQuantity']:,.2f} "
-                    f"{lot['unit']} available — "
-                    f"sell by {lot['sellByDate']}"
+            if lots.empty:
+                otherUnits = sorted(
+                    unit for (stockCrop, unit) in matchingStock
+                    if stockCrop == cropID and unit != requestUnit
                 )
-
-            with st.form("allocation_form"):
-                selectedLotRow = st.selectbox(
-                    "Harvested stock",
-                    lotRows,
-                    format_func=showLot
-                )
-
-                selectedLot = lots.loc[
-                    selectedLotRow
-                ]
-
-                maximumAllocation = min(
-                    float(
-                        selectedLot["availableQuantity"]
-                    ),
-                    requestRemaining
-                )
-
-                allocationQuantity = st.number_input(
-                    f"Quantity to allocate ({requestUnit})",
-                    min_value=0.01,
-                    max_value=float(maximumAllocation),
-                    value=min(
-                        1.0,
-                        float(maximumAllocation)
+                if otherUnits:
+                    reason = (
+                        f"You have {escape(cropName.lower())} in {escape(', '.join(otherUnits))}, but this request "
+                        f"is in {escape(requestUnit)}. Stock can only be allocated in the same unit."
                     )
-                )
-
-                allocationSubmitted = (
-                    st.form_submit_button(
-                        "Reserve allocation"
-                    )
-                )
-
-            if allocationSubmitted:
-                created, message = createAllocation(
-                    requestID=requestID,
-                    lotID=int(selectedLot["lotID"]),
-                    quantity=allocationQuantity,
-                    userID=userID
-                )
-
-                if created:
-                    st.session_state.allocationMessage = (
-                        message
-                    )
-
-                    st.rerun()
-
                 else:
-                    st.warning(message)
+                    reason = (
+                        f"You have no {escape(cropName.lower())} in stock to allocate. Record a harvest of "
+                        f"{escape(cropName.lower())} in {escape(requestUnit)} to fill this request."
+                    )
+                st.markdown(
+                    '<div class="hl-alloc-note"><span class="material-symbols-rounded" aria-hidden="true">'
+                    f'info</span>{reason}</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                lotRows = lots.index.tolist()
+
+                def showLot(rowIndex):
+                    lot = lots.loc[rowIndex]
+                    sellBy = pd.to_datetime(lot["sellByDate"], errors="coerce")
+                    sellByText = "" if pd.isna(sellBy) else f" · sell by {sellBy.day} {sellBy.strftime('%b %Y')}"
+                    return (
+                        f"Lot #{int(lot['lotID'])} · "
+                        f"{formatQuantity(float(lot['availableQuantity']), str(lot['unit']))} available"
+                        f"{sellByText}"
+                    )
+
+                with st.form("allocation_form", border=False):
+                    selectedLotRow = st.selectbox(
+                        "Lot to reserve from",
+                        lotRows,
+                        format_func=showLot
+                    )
+                    selectedLot = lots.loc[
+                        selectedLotRow
+                    ]
+                    maximumAllocation = min(
+                        float(
+                            selectedLot["availableQuantity"]
+                        ),
+                        requestRemaining
+                    )
+                    allocationQuantity = st.number_input(
+                        f"Amount to reserve ({requestUnit})",
+                        min_value=0.01,
+                        max_value=float(maximumAllocation),
+                        value=min(
+                            1.0,
+                            float(maximumAllocation)
+                        ),
+                        help=f"Up to {formatQuantity(maximumAllocation, requestUnit)}"
+                    )
+                    allocationSubmitted = (
+                        st.form_submit_button(
+                            "Reserve stock",
+                            type="primary",
+                            icon=":material/inventory:"
+                        )
+                    )
+
+                if allocationSubmitted:
+                    created, message = createAllocation(
+                        requestID=requestID,
+                        lotID=int(selectedLot["lotID"]),
+                        quantity=allocationQuantity,
+                        userID=userID
+                    )
+                    if created:
+                        st.session_state.allocationMessage = (
+                            message
+                        )
+                        st.rerun()
+                    else:
+                        st.warning(message)
 
     allocations = selectData(
         """SELECT a.allocationID, a.requestID, a.lotID, CONCAT(u.fname, ' ', u.lname) AS requestedBy, m.marketName, c.cropName, a.quantityAllocated, hl.unit, a.allocationDate, a.allocStatus AS status
@@ -4150,42 +4431,6 @@ def showFarmerAllocations(current_user):
     if allocations.empty:
         st.info("You have not created any allocations.")
         return
-    else:
-        displayedAllocations = allocations.rename(
-            columns={
-                "allocationID": "Allocation #",
-                "requestID": "Request #",
-                "lotID": "Lot #",
-                "requestedBy": "Requested by",
-                "marketName": "Market",
-                "cropName": "Crop",
-                "quantityAllocated": "Quantity allocated",
-                "unit": "Unit",
-                "allocationDate": "Allocation date",
-                "status": "Status"
-            }
-        )
-
-        activeMask = allocations["status"].isin(
-            ["reserved", "partiallyDelivered"]
-        )
-        activeAllocationTab, allocationHistoryTab = st.tabs(
-            ["Active allocations", "Allocation history"]
-        )
-
-        with activeAllocationTab:
-            activeDisplay = displayedAllocations[activeMask]
-            if activeDisplay.empty:
-                st.info("There are no active allocations.")
-            else:
-                showTable(activeDisplay, use_container_width=True, hide_index=True)
-
-        with allocationHistoryTab:
-            historyDisplay = displayedAllocations[~activeMask]
-            if historyDisplay.empty:
-                st.info("There are no past allocations.")
-            else:
-                showTable(historyDisplay, use_container_width=True, hide_index=True)
 
     allocations["reservedRemaining"] = 0.0
 
@@ -4228,98 +4473,8 @@ def showFarmerAllocations(current_user):
             "reservedRemaining"
         ] = reservedRemaining
 
-    displayedAllocations = allocations[
-        [
-            "requestedBy",
-            "marketName",
-            "cropName",
-            "quantityAllocated",
-            "unit",
-            "reservedRemaining",
-            "allocationDate",
-            "status"
-        ]
-    ].copy()
+    showAllocationList(allocations, userID)
 
-    releasable = allocations[
-        allocations["reservedRemaining"] > 0
-    ]
-
-    if releasable.empty:
-        return
-
-    releaseRows = releasable.index.tolist()
-
-    def showReleasableAllocation(rowIndex):
-        allocation = releasable.loc[rowIndex]
-
-        return (
-            f"{allocation['marketName']} — "
-            f"{allocation['cropName']} — "
-            f"{allocation['reservedRemaining']:,.2f} "
-            f"{allocation['unit']} reserved"
-        )
-
-    with st.expander("Cancel reserved quantity"):
-        with st.form(
-            "cancel_reservation_form",
-            clear_on_submit=True
-):
-            selectedAllocationRow = st.selectbox(
-                "Allocation",
-                releaseRows,
-                format_func=showReleasableAllocation
-            )
-
-            selectedAllocation = releasable.loc[
-                selectedAllocationRow
-            ]
-
-            maximumCancellation = float(
-                selectedAllocation["reservedRemaining"]
-            )
-
-            cancellationQuantity = st.number_input(
-                f"Quantity to cancel "
-                f"({selectedAllocation['unit']})",
-                min_value=0.01,
-                max_value=maximumCancellation,
-                value=min(
-                    1.0,
-                    maximumCancellation
-                )
-            )
-
-            reason = st.text_input(
-                "Reason (optional)"
-            )
-
-            cancelSubmitted = st.form_submit_button(
-                "Cancel reserved quantity"
-            )
-
-        if cancelSubmitted:
-            canceled, message = cancelReservedQuantity(
-                allocationID=int(
-                    selectedAllocation["allocationID"]
-                ),
-                cancellationQuantity=cancellationQuantity,
-                reason=reason,
-                userID=userID
-            )
-
-            if canceled:
-                st.session_state.allocationMessage = (
-                    f"Reservation canceled successfully. "
-                    f"{cancellationQuantity:,.2f} "
-                    f"{selectedAllocation['unit']} was "
-                    f"returned to available stock."
-                )
-
-                st.rerun()
-
-            else:
-                st.warning(message)
 
 def createAllocation(requestID, lotID, quantity, userID):
     connection = None
