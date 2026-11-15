@@ -283,6 +283,96 @@ def setReferenceUnitActive(unitName, isActive, adminID):
             connection.close()
 
 
+def changeReferenceCrop(cropID, cropName, isActive, adminID):
+    # Admin edits keep crop IDs and historical transactions unchanged.
+    name = str(cropName).strip()
+    if not name or len(name) > 100:
+        return False, "Enter a crop name of 1-100 characters."
+    connection = None
+    cursor = None
+    try:
+        connection = getConnection()
+        cursor = connection.cursor()
+        cursor.execute("SELECT role FROM Users WHERE userID = %s", (adminID,))
+        row = cursor.fetchone()
+        if row is None or str(row[0]).lower() != "admin":
+            return False, "Only administrators can manage crops."
+        cursor.execute("SELECT cropName, isActive FROM Crops WHERE cropID = %s FOR UPDATE", (cropID,))
+        original = cursor.fetchone()
+        if original is None:
+            return False, "Crop not found. Please refresh."
+        cursor.execute(
+            "SELECT cropID FROM Crops WHERE cropName = %s AND cropID <> %s",
+            (name, cropID)
+        )
+        if cursor.fetchone() is not None:
+            return False, "A different crop already has that name."
+        active = 1 if isActive else 0
+        if str(original[0]) == name and int(original[1]) == active:
+            return False, "No changes to save."
+        cursor.execute(
+            "UPDATE Crops SET cropName = %s, isActive = %s WHERE cropID = %s",
+            (name, active, cropID)
+        )
+        connection.commit()
+        logActivity(adminID, "admin_crop_updated", f"Crop {cropID}: {original[0]} -> {name}; active={active}")
+        return True, "Crop updated successfully."
+    except Exception as error:
+        if connection:
+            connection.rollback()
+        print("Crop edit error:", repr(error))
+        return False, friendlyDatabaseError(error)
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
+def changeReferenceMarket(marketID, marketName, location, isActive, adminID):
+    # Updating/deactivating a market does not remove past requests or receipts.
+    name = str(marketName).strip()
+    place = str(location).strip()
+    if not name or len(name) > 100 or not place or len(place) > 255:
+        return False, "Enter a market name (1-100) and location (1-255)."
+    connection = None
+    cursor = None
+    try:
+        connection = getConnection()
+        cursor = connection.cursor()
+        cursor.execute("SELECT role FROM Users WHERE userID = %s", (adminID,))
+        row = cursor.fetchone()
+        if row is None or str(row[0]).lower() != "admin":
+            return False, "Only administrators can manage markets."
+        cursor.execute(
+            "SELECT marketName, location, isActive FROM Markets WHERE marketID = %s FOR UPDATE",
+            (marketID,)
+        )
+        original = cursor.fetchone()
+        if original is None:
+            return False, "Market not found. Please refresh."
+        active = 1 if isActive else 0
+        if str(original[0]) == name and str(original[1]) == place and int(original[2]) == active:
+            return False, "No changes to save."
+        cursor.execute(
+            "UPDATE Markets SET marketName = %s, location = %s, isActive = %s WHERE marketID = %s",
+            (name, place, active, marketID)
+        )
+        connection.commit()
+        logActivity(adminID, "admin_market_updated", f"Market {marketID}: {original[0]} -> {name}; active={active}")
+        return True, "Market updated successfully."
+    except Exception as error:
+        if connection:
+            connection.rollback()
+        print("Market edit error:", repr(error))
+        return False, friendlyDatabaseError(error)
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
 def signUpUser(
     fname,
     lname,
@@ -1064,6 +1154,20 @@ def createProduceRequest(
         connection = getConnection()
         cursor = connection.cursor()
 
+        # Re-check current status so stale browser forms cannot create requests.
+        cursor.execute(
+            "SELECT cropID FROM Crops WHERE cropID = %s AND isActive = 1 FOR UPDATE",
+            (cropID,)
+        )
+        if cursor.fetchone() is None:
+            return False, "This crop is inactive. Please choose another crop."
+        cursor.execute(
+            "SELECT marketID FROM Markets WHERE marketID = %s AND isActive = 1 FOR UPDATE",
+            (marketID,)
+        )
+        if cursor.fetchone() is None:
+            return False, "This market is inactive. Please choose another market."
+
         requestDate = datetime.now()
 
         cursor.execute(
@@ -1134,6 +1238,7 @@ def showProduceSearch(current_user):
     crops = selectData(
         """SELECT cropID, cropName
            FROM Crops
+           WHERE isActive = 1
            ORDER BY cropName"""
     )
 
@@ -1187,7 +1292,7 @@ def showProduceSearch(current_user):
 
         produceQuery = """SELECT hl.lotID, cc.cropID, f.farmName, f.location, c.cropName, hl.quantityHarvested, hl.unit, hl.harvestDate, hl.sellByDate
                         FROM HarvestLots hl, CropCycle cc, Farms f, Crops c
-                        WHERE hl.cycleID = cc.cycleID AND cc.farmID = f.farmID AND cc.cropID = c.cropID AND hl.status = 1 AND hl.harvestDate <= %s AND (hl.sellByDate IS NULL OR hl.sellByDate >= %s)"""
+                        WHERE hl.cycleID = cc.cycleID AND cc.farmID = f.farmID AND cc.cropID = c.cropID AND c.isActive = 1 AND hl.status = 1 AND hl.harvestDate <= %s AND (hl.sellByDate IS NULL OR hl.sellByDate >= %s)"""
         values = [
             availableOn,
             availableOn
@@ -1312,7 +1417,7 @@ def showProduceSearch(current_user):
 
         listing = selectData( """SELECT hl.lotID, cc.cropID, f.farmName, f.location,  c.cropName, hl.quantityHarvested, hl.unit, hl.harvestDate, hl.sellByDate
             FROM HarvestLots hl, CropCycle cc, Farms f, Crops c
-            WHERE hl.lotID = %s AND hl.cycleID = cc.cycleID AND cc.farmID = f.farmID AND cc.cropID = c.cropID AND hl.status = 1""",(selectedLotID,) )
+            WHERE hl.lotID = %s AND hl.cycleID = cc.cycleID AND cc.farmID = f.farmID AND cc.cropID = c.cropID AND c.isActive = 1 AND hl.status = 1""",(selectedLotID,) )
 
         if listing.empty:
             st.error("This produce listing is no longer available.")
@@ -1367,6 +1472,7 @@ def showProduceSearch(current_user):
             markets = selectData(
                 """SELECT marketID, marketName, location
                    FROM Markets
+                   WHERE isActive = 1
                    ORDER BY marketName"""
             )
 
@@ -1895,6 +2001,7 @@ def showFarmManagement(current_user):
     crops = selectData(
         """SELECT cropID, cropName
            FROM Crops
+           WHERE isActive = 1
            ORDER BY cropName"""
     )
 
@@ -2350,6 +2457,7 @@ def showHarvestManagement(current_user):
     cycles = selectData( """SELECT cc.cycleID, c.cropName, cc.expectedYield, cc.expectedUnit, cc.expectedHarvestDate
            FROM CropCycle cc, Crops c
            WHERE cc.cropID = c.cropID AND cc.farmID = %s AND cc.status = 1
+             AND c.isActive = 1
            ORDER BY cc.expectedHarvestDate""", (selectedFarmID,))
 
     if cycles.empty:
@@ -2986,7 +3094,8 @@ def addHarvestLot(cycleID, quantity,unit, harvestDate,sellByDate,userID):
                WHERE cc.farmID = o.farmID
                AND cc.cycleID = %s
                AND o.userID = %s
-               AND cc.status = 1""",
+               AND cc.status = 1
+               AND EXISTS (SELECT 1 FROM Crops c WHERE c.cropID = cc.cropID AND c.isActive = 1)""",
             (cycleID, userID)
         )
 
@@ -3810,12 +3919,14 @@ def showMarketRequests(current_user):
     markets = selectData(
         """SELECT marketID, marketName, location
            FROM Markets
+           WHERE isActive = 1
            ORDER BY marketName"""
     )
 
     crops = selectData(
         """SELECT cropID, cropName
            FROM Crops
+           WHERE isActive = 1
            ORDER BY cropName"""
     )
 
@@ -4772,42 +4883,124 @@ def showAdminReferenceData(current_user):
                             connection.close()
 
     with crop_tab:
-        crops = selectData("SELECT cropID, cropName FROM Crops ORDER BY cropName")
-        st.dataframe(crops, use_container_width=True, hide_index=True)
+        st.subheader("Manage crops")
+        st.caption("Inactive crops remain in past records but cannot be selected for new entries.")
+        crops = selectData("SELECT cropID, cropName, isActive FROM Crops ORDER BY cropName")
+        if not crops.empty:
+            displayCrops = crops.copy()
+            displayCrops["Status"] = displayCrops["isActive"].map(
+                {1: "Active", 0: "Inactive", True: "Active", False: "Inactive"}
+            )
+            st.dataframe(
+                displayCrops[["cropID", "cropName", "Status"]].rename(
+                    columns={"cropID": "Crop ID", "cropName": "Crop"}
+                ), use_container_width=True, hide_index=True
+            )
+
+        if "adminCropMessage" in st.session_state:
+            st.success(st.session_state.pop("adminCropMessage"))
 
         with st.form("admin_add_crop"):
-            crop_name = st.text_input("Crop name")
+            crop_name = st.text_input("New crop name")
             submitted = st.form_submit_button("Add crop")
+        if submitted:
+            name = crop_name.strip()
+            if not name or len(name) > 100:
+                st.warning("Enter a crop name of 1-100 characters.")
+            elif changeData(
+                "INSERT INTO Crops (cropName, isActive) VALUES (%s, 1)", (name,)
+            ):
+                logActivity(current_user["userID"], "admin_crop_created", f"Added crop {name}")
+                st.session_state["adminCropMessage"] = "Crop added successfully."
+                st.rerun()
 
-            if submitted:
-                if not crop_name.strip():
-                    st.warning("Enter a crop name.")
-                elif changeData(
-                    "INSERT INTO Crops (cropName) VALUES (%s)",
-                    (crop_name.strip(),),
-                ):
-                    st.success("Crop added successfully.")
+        if not crops.empty:
+            cropOptions = {
+                f"{row['cropName']} (ID {int(row['cropID'])})": int(row['cropID'])
+                for _, row in crops.iterrows()
+            }
+            chosen = st.selectbox("Existing crop", list(cropOptions), key="admin_crop_choice")
+            selectedCrop = crops[crops["cropID"] == cropOptions[chosen]].iloc[0]
+            with st.form(f"admin_edit_crop_{cropOptions[chosen]}"):
+                updatedName = st.text_input("Edit crop name", value=str(selectedCrop["cropName"]))
+                activeLabel = st.selectbox(
+                    "Crop status", ["Active", "Inactive"],
+                    index=0 if bool(selectedCrop["isActive"]) else 1
+                )
+                editSubmitted = st.form_submit_button("Save crop changes")
+            if editSubmitted:
+                success, message = changeReferenceCrop(
+                    cropOptions[chosen], updatedName, activeLabel == "Active",
+                    current_user["userID"]
+                )
+                if success:
+                    st.session_state["adminCropMessage"] = message
                     st.rerun()
+                else:
+                    st.warning(message)
 
     with market_tab:
+        st.subheader("Manage markets")
+        st.caption("Inactive markets remain in earlier requests but cannot be chosen for new requests.")
         markets = selectData(
-            "SELECT marketID, marketName, location FROM Markets ORDER BY marketName"
+            "SELECT marketID, marketName, location, isActive FROM Markets ORDER BY marketName"
         )
-        st.dataframe(markets, use_container_width=True, hide_index=True)
+        if not markets.empty:
+            displayMarkets = markets.copy()
+            displayMarkets["Status"] = displayMarkets["isActive"].map(
+                {1: "Active", 0: "Inactive", True: "Active", False: "Inactive"}
+            )
+            st.dataframe(
+                displayMarkets[["marketID", "marketName", "location", "Status"]].rename(
+                    columns={"marketID": "Market ID", "marketName": "Market", "location": "Location"}
+                ), use_container_width=True, hide_index=True
+            )
+
+        if "adminMarketMessage" in st.session_state:
+            st.success(st.session_state.pop("adminMarketMessage"))
 
         with st.form("admin_add_market"):
-            market_name = st.text_input("Market name")
-            market_location = st.text_input("Market location")
+            market_name = st.text_input("New market name")
+            market_location = st.text_input("New market location")
             submitted = st.form_submit_button("Add market")
+        if submitted:
+            name = market_name.strip()
+            place = market_location.strip()
+            if not name or len(name) > 100 or not place or len(place) > 255:
+                st.warning("Enter a market name (1-100) and location (1-255).")
+            elif changeData(
+                "INSERT INTO Markets (marketName, location, isActive) VALUES (%s, %s, 1)",
+                (name, place)
+            ):
+                logActivity(current_user["userID"], "admin_market_created", f"Added market {name}")
+                st.session_state["adminMarketMessage"] = "Market added successfully."
+                st.rerun()
 
-            if submitted:
-                if not market_name.strip() or not market_location.strip():
-                    st.warning("Enter the market name and location.")
+        if not markets.empty:
+            marketOptions = {
+                f"{row['marketName']} (ID {int(row['marketID'])})": int(row['marketID'])
+                for _, row in markets.iterrows()
+            }
+            chosen = st.selectbox("Existing market", list(marketOptions), key="admin_market_choice")
+            selectedMarket = markets[markets["marketID"] == marketOptions[chosen]].iloc[0]
+            with st.form(f"admin_edit_market_{marketOptions[chosen]}"):
+                updatedName = st.text_input("Edit market name", value=str(selectedMarket["marketName"]))
+                updatedLocation = st.text_input("Edit market location", value=str(selectedMarket["location"]))
+                activeLabel = st.selectbox(
+                    "Market status", ["Active", "Inactive"],
+                    index=0 if bool(selectedMarket["isActive"]) else 1
+                )
+                editSubmitted = st.form_submit_button("Save market changes")
+            if editSubmitted:
+                success, message = changeReferenceMarket(
+                    marketOptions[chosen], updatedName, updatedLocation,
+                    activeLabel == "Active", current_user["userID"]
+                )
+                if success:
+                    st.session_state["adminMarketMessage"] = message
+                    st.rerun()
                 else:
-                    query = "INSERT INTO Markets (marketName, location) VALUES (%s, %s)"
-                    if changeData(query, (market_name.strip(), market_location.strip())):
-                        st.success("Market added successfully.")
-                        st.rerun()
+                    st.warning(message)
 
     with unit_tab:
         st.subheader("Manage units")
@@ -5202,7 +5395,7 @@ def directAvailabilityQuestion(question):
                    hl.unit, hl.harvestDate, hl.sellByDate
             FROM HarvestLots hl, CropCycle cc, Crops c, StockMovements sm
             WHERE hl.cycleID = cc.cycleID AND cc.cropID = c.cropID
-              AND sm.lotID = hl.lotID AND hl.status = 1
+              AND sm.lotID = hl.lotID AND hl.status = 1 AND c.isActive = 1
               AND hl.harvestDate <= '{selectedDate.isoformat()}'
               AND (hl.sellByDate IS NULL OR hl.sellByDate >= '{selectedDate.isoformat()}')
             GROUP BY hl.lotID, c.cropName, hl.unit, hl.harvestDate, hl.sellByDate
@@ -5225,7 +5418,7 @@ def formatDirectAvailabilityAnswer(results, selectedDate):
             f"{float(lot['availableQuantity']):,.2f} {lot['unit']} available"
         )
     return (f"Based on current recorded stock, {count} harvest "
-            f"lot{'s' if count != 1 else ''} meet the availability conditions "
+            f"lot{'s' if count != 1 else ''} {'meet' if count != 1 else 'meets'} the availability conditions "
             f"for {displayDate}:\n\n" + "\n\n".join(details) +
             "\n\nThis is not a guarantee of future stock: reservations, "
             "deliveries and losses may change these quantities.")

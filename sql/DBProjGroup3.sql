@@ -36,11 +36,12 @@ CREATE TABLE OwnedBy(
 );
 
 
-CREATE TABLE Crops(
+CREATE TABLE Crops (
     cropID INT AUTO_INCREMENT PRIMARY KEY,
-    cropName VARCHAR(100) NOT NULL UNIQUE
+    cropName VARCHAR(100) NOT NULL UNIQUE,
+    isActive BOOLEAN NOT NULL DEFAULT 1,
+    CHECK (isActive IN (0, 1))
 );
-
 
 CREATE TABLE CropCycle(
     cycleID INT AUTO_INCREMENT PRIMARY KEY,
@@ -81,13 +82,13 @@ CREATE TABLE HarvestLotImages(
     FOREIGN KEY (lotID) REFERENCES HarvestLots(lotID)
 );
 
-
-CREATE TABLE Markets(
+CREATE TABLE Markets (
     marketID INT AUTO_INCREMENT PRIMARY KEY,
     marketName VARCHAR(100) NOT NULL,
-    location VARCHAR(255) NOT NULL
+    location VARCHAR(255) NOT NULL,
+    isActive BOOLEAN NOT NULL DEFAULT 1,
+    CHECK (isActive IN (0, 1))
 );
-
 
 CREATE TABLE MarketRequests(
     requestID INT AUTO_INCREMENT PRIMARY KEY,
