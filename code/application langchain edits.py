@@ -1239,9 +1239,9 @@ def showProduceCards(cropTotals, lots, cropImages):
             sellByTag = '<span class="hl-produce-tag">No sell-by date</span>'
         else:
             daysLeft = (sellBy.date() - date.today()).days
-            when = "today" if daysLeft <= 0 else "tomorrow" if daysLeft == 1 else f"in {daysLeft} days"
+            left = "last day" if daysLeft <= 0 else "1 day left" if daysLeft == 1 else f"{daysLeft} days left"
             tone = " hl-produce-tag-warn" if daysLeft <= 7 else ""
-            sellByTag = f'<span class="hl-produce-tag{tone}">Sell by {when}</span>'
+            sellByTag = f'<span class="hl-produce-tag{tone}">Sell by {sellBy.day} {sellBy.strftime("%b")} · {left}</span>'
 
         lotWord = "lot" if row.lots == 1 else "lots"
         cards.append(
@@ -1258,6 +1258,13 @@ def showProduceCards(cropTotals, lots, cropImages):
         )
 
     st.markdown(f'<div class="hl-produce-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
+def keepStockView():
+    # Clicking the selected option would clear it; keep the last choice instead.
+    if st.session_state.get("hl_stock_view") is None:
+        st.session_state["hl_stock_view"] = st.session_state.get("hl_stock_view_last", "Cards")
+    st.session_state["hl_stock_view_last"] = st.session_state["hl_stock_view"]
 
 
 def goToPage(page):
@@ -1375,10 +1382,34 @@ def showDashboard(current_user):
             .sort_values("availableNow", ascending=False)
         )
 
-        st.subheader("Stock by crop")
-        st.caption("Lots of the same crop and unit are added together.")
+        titleCol, viewCol = st.columns([0.7, 0.3], vertical_alignment="bottom")
+        with titleCol:
+            st.subheader("Stock by crop")
+            st.caption("Lots of the same crop and unit are added together.")
+        with viewCol:
+            stockView = st.segmented_control(
+                "Stock view",
+                ["Cards", "Table"],
+                default="Cards",
+                key="hl_stock_view",
+                on_change=keepStockView,
+                format_func=lambda option: {"Cards": ":material/grid_view: Cards", "Table": ":material/table_rows: Table"}[option],
+                label_visibility="collapsed",
+            )
 
-        cropImages = selectData(
+        if stockView == "Table":
+            showTable(
+                pd.DataFrame({
+                    "Crop": cropTotals["cropName"],
+                    "Lots": cropTotals["lots"],
+                    "In stock": [formatQuantity(q, u) for q, u in zip(cropTotals["stock"], cropTotals["unit"])],
+                    "Reserved": [formatQuantity(q, u) for q, u in zip(cropTotals["reserved"], cropTotals["unit"])],
+                    "Available": [formatQuantity(q, u) for q, u in zip(cropTotals["availableNow"], cropTotals["unit"])],
+                    "Next sell-by": cropTotals["nextSellBy"],
+                })
+            )
+
+        cropImages = pd.DataFrame() if stockView == "Table" else selectData(
             """SELECT hi.lotID, c.cropName, hi.imageName
                FROM HarvestLotImages hi
                JOIN HarvestLots hl ON hi.lotID = hl.lotID
@@ -1388,7 +1419,8 @@ def showDashboard(current_user):
                ORDER BY (o.userID IS NULL), hl.harvestDate DESC, hi.imageNumber""",
             (current_user["userID"],)
         )
-        showProduceCards(cropTotals, available, cropImages)
+        if stockView != "Table":
+            showProduceCards(cropTotals, available, cropImages)
 
         st.subheader("Harvested inventory")
 
