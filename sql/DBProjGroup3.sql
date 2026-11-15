@@ -53,6 +53,7 @@ CREATE TABLE CropCycle(
     status BOOLEAN NOT NULL DEFAULT 1,
     FOREIGN KEY (farmID) REFERENCES Farms(farmID),
     FOREIGN KEY (cropID) REFERENCES Crops(cropID),
+    FOREIGN KEY (expectedUnit) REFERENCES Units(unitName),
     CHECK (expectedYield > 0)
 );
 
@@ -66,6 +67,7 @@ CREATE TABLE HarvestLots(
     sellByDate DATE,
     status BOOLEAN NOT NULL DEFAULT 1,
     FOREIGN KEY (cycleID) REFERENCES CropCycle(cycleID),
+    FOREIGN KEY (unit) REFERENCES Units(unitName),
     CHECK (quantityHarvested > 0),
     CHECK (
         sellByDate IS NULL
@@ -102,6 +104,7 @@ CREATE TABLE MarketRequests(
     FOREIGN KEY (userID) REFERENCES Users(userID),
     FOREIGN KEY (marketID) REFERENCES Markets(marketID),
     FOREIGN KEY (cropID) REFERENCES Crops(cropID),
+    FOREIGN KEY (unit) REFERENCES Units(unitName),
     CHECK (quantityRequested > 0),
     CHECK (reqStatus IN ('pending', 'partiallyFulfilled', 'fullyFulfilled', 'canceled'))
 );
@@ -149,6 +152,7 @@ CREATE TABLE StockMovements(
     FOREIGN KEY (lotID) REFERENCES HarvestLots(lotID),
     FOREIGN KEY (allocationID) REFERENCES Allocations(allocationID),
     FOREIGN KEY (performedBy) REFERENCES Users(userID),
+    FOREIGN KEY (unit) REFERENCES Units(unitName),
     CHECK (quantity > 0),
     CHECK (movementType IN ('added', 'reserved', 'canceled', 'delivered', 'loss', 'correction_added', 'correction_removed'))
 );
@@ -167,6 +171,7 @@ CREATE TABLE DeliveryReceipts(
     FOREIGN KEY (requestID) REFERENCES MarketRequests(requestID),
     FOREIGN KEY (allocationID) REFERENCES Allocations(allocationID),
     FOREIGN KEY (confirmedBy) REFERENCES Users(userID),
+    FOREIGN KEY (unit) REFERENCES Units(unitName),
     CHECK (expectedQuantity > 0),
     CHECK (receivedQuantity >= 0),
     CHECK (discrepancyQuantity = expectedQuantity - receivedQuantity)
