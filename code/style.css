@@ -81,19 +81,22 @@ h1, h2, h3, .hl-logo { font-variant-numeric: lining-nums; }
 .stApp:not(:has(.hl-auth-marker)) [data-testid="stSidebarCollapsedControl"] { display:none; }
 .stApp:not(:has(.hl-auth-marker)) .block-container { max-width:1280px; padding-top:0; padding-bottom:4rem; }
 [data-testid="stLayoutWrapper"]:has(> .st-key-hl_topbar) { position:sticky; top:0; z-index:990; }
-.st-key-hl_topbar { background:rgba(245,243,234,.94); backdrop-filter:blur(8px); border-bottom:1px solid var(--hl-line); padding:14px 0 12px; margin-bottom:18px; }
+.st-key-hl_topbar { background:var(--hl-green-dark); box-shadow:0 0 0 100vmax var(--hl-green-dark), 0 6px 18px rgba(29,68,48,.18); clip-path:inset(-100vmax -100vmax -24px); padding:14px 0 12px; margin-bottom:26px; }
+.st-key-hl_topbar .hl-logo { color:#f5f3ea; }
+.st-key-hl_topbar .hl-logo b { color:var(--hl-leaf); }
+.st-key-hl_topbar .hl-logo-mark { background:#f5f3ea; color:var(--hl-green-dark); }
 .st-key-hl_topbar .hl-logo { font-size:27px; }
 .st-key-hl_topbar [data-testid="stRadio"] { width:100%; }
 .st-key-hl_topbar [role="radiogroup"] { display:flex; justify-content:center; flex-wrap:nowrap; gap:2px; overflow-x:auto; scrollbar-width:none; }
 .st-key-hl_topbar [role="radiogroup"] label { margin:0; padding:8px 14px; white-space:nowrap; flex:0 0 auto; border-radius:999px; cursor:pointer; transition:background .15s, color .15s; }
 .st-key-hl_topbar [role="radiogroup"] label > div > div:first-child:not([data-testid]) { display:none; }
-.st-key-hl_topbar [role="radiogroup"] label p { font-size:14.5px; font-weight:500; color:var(--hl-muted); margin:0; }
-.st-key-hl_topbar [role="radiogroup"] label:hover { background:#ebf0e2; }
-.st-key-hl_topbar [role="radiogroup"] label:hover p { color:var(--hl-ink); }
-.st-key-hl_topbar [role="radiogroup"] label[data-selected="true"] { background:var(--hl-green-dark); }
-.st-key-hl_topbar [role="radiogroup"] label[data-selected="true"] p { color:#fff; font-weight:600; }
-.st-key-hl_topbar [data-testid="stPopover"] button { border:1px solid var(--hl-line); background:#fff; border-radius:999px; color:var(--hl-ink); font-weight:600; }
-.st-key-hl_topbar [data-testid="stPopover"] button:hover { border-color:var(--hl-green); color:var(--hl-green); }
+.st-key-hl_topbar [role="radiogroup"] label p { font-size:14.5px; font-weight:500; color:rgba(245,243,234,.74); margin:0; }
+.st-key-hl_topbar [role="radiogroup"] label:hover { background:rgba(245,243,234,.10); }
+.st-key-hl_topbar [role="radiogroup"] label:hover p { color:#fff; }
+.st-key-hl_topbar [role="radiogroup"] label[data-selected="true"] { background:#f5f3ea; }
+.st-key-hl_topbar [role="radiogroup"] label[data-selected="true"] p { color:var(--hl-green-dark); font-weight:600; }
+.st-key-hl_topbar [data-testid="stPopover"] button { border:1px solid rgba(245,243,234,.28); background:rgba(245,243,234,.08); border-radius:999px; color:#f5f3ea; font-weight:600; }
+.st-key-hl_topbar [data-testid="stPopover"] button:hover { border-color:#f5f3ea; background:rgba(245,243,234,.16); color:#fff; }
 .hl-account-card { display:flex; align-items:center; gap:12px; padding-bottom:12px; margin-bottom:6px; border-bottom:1px solid var(--hl-line); }
 
 /* Dashboard stat cards */
