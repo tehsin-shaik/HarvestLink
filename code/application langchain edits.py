@@ -2043,24 +2043,140 @@ def imagePixelFingerprint(image):
     return digest.hexdigest()
 
 
+def selectImageLot(label):
+    st.session_state["selected_image_lot"] = label
+
+
+def keepGalleryView():
+    if st.session_state.get("image_gallery_view") is None:
+        st.session_state["image_gallery_view"] = "all"
+
+
+def showLotGallery(lots, labelByLot):
+    from html import escape
+
+    missing = int((lots["photoCount"] == 0).sum())
+    lotWord = "lot" if len(lots) == 1 else "lots"
+    textCol, filterCol = st.columns([0.6, 0.4], vertical_alignment="center")
+    with textCol:
+        st.markdown(
+            f'<p class="hl-gallery-sub">{len(lots)} {lotWord} · '
+            f'{missing} still {"needs" if missing == 1 else "need"} a photo</p>',
+            unsafe_allow_html=True
+        )
+    with filterCol:
+        with st.container(horizontal=True, horizontal_alignment="right"):
+            view = st.segmented_control(
+                "Show",
+                ["all", "missing"],
+                format_func=lambda option: "All lots" if option == "all" else f"Needs a photo ({missing})",
+                default="all",
+                key="image_gallery_view",
+                on_change=keepGalleryView,
+                label_visibility="collapsed"
+            )
+
+    shown = lots[lots["photoCount"] == 0] if view == "missing" else lots
+    if shown.empty:
+        st.markdown(
+            '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+            'check_circle</span>Every lot has a photo.</div>',
+            unsafe_allow_html=True
+        )
+        return
+
+    firstLabel = next(iter(labelByLot.values()))
+    selectedLabel = st.session_state.get("selected_image_lot", firstLabel)
+
+    for start in range(0, len(shown), 4):
+        columns = st.columns(4)
+        for column, row in zip(columns, shown.iloc[start:start + 4].itertuples(index=False)):
+            label = labelByLot[row.lotID]
+            selected = label == selectedLabel
+            count = int(row.photoCount)
+            imageData = showcaseImageData(row.coverImage) if isinstance(row.coverImage, str) else None
+
+            if imageData:
+                photo = f'<img src="data:image/jpeg;base64,{imageData}" alt="{escape(str(row.cropName))}">'
+            else:
+                photo = (
+                    '<span class="hl-gallery-placeholder"><span class="material-symbols-rounded" '
+                    'aria-hidden="true">add_a_photo</span>No photo yet</span>'
+                )
+
+            if count == 0:
+                badge = '<span class="hl-gallery-count hl-gallery-count-none">No photos</span>'
+            else:
+                badge = f'<span class="hl-gallery-count">{count} photo{"" if count == 1 else "s"}</span>'
+
+            harvested = pd.to_datetime(row.harvestDate, errors="coerce")
+            harvestedText = "—" if pd.isna(harvested) else f"{harvested.day} {harvested.strftime('%b %Y')}"
+            selectedClass = " hl-gallery-selected" if selected else ""
+
+            with column, st.container(key=f"image_lot_card_{row.lotID}"):
+                st.markdown(
+                    f'<div class="hl-gallery-card{selectedClass}"><div class="hl-gallery-photo">{photo}{badge}</div>'
+                    f'<div class="hl-gallery-body"><span class="hl-gallery-name">{escape(str(row.cropName))}</span>'
+                    f'<span class="hl-gallery-meta">Lot #{row.lotID} · {escape(str(row.farmName))}</span>'
+                    f'<span class="hl-gallery-meta">Harvested {harvestedText}</span></div></div>',
+                    unsafe_allow_html=True
+                )
+                st.button(
+                    "Selected" if selected else "Manage photos",
+                    key=f"image_lot_pick_{row.lotID}",
+                    icon=":material/check:" if selected else ":material/photo_library:",
+                    type="primary" if selected else "secondary",
+                    width="stretch",
+                    on_click=selectImageLot,
+                    args=(label,)
+                )
+
+
+@st.cache_data(show_spinner=False)
+def lotPhotoData(imageName):
+    import base64
+    from io import BytesIO
+    from PIL import ImageOps
+
+    imagePath = resolveHarvestImagePath(imageName)
+    if imagePath is None:
+        return None
+    try:
+        with Image.open(imagePath) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image = ImageOps.fit(image, (640, 480))
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=85)
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception as error:
+        print(f"Lot photo failed ({imageName!r}): {error!r}")
+        return None
+
+
 def showImages(current_user):
+    from html import escape
+
     st.header("Harvest lot images")
-    if "harvestImageMessage" in st.session_state:
-        st.success(st.session_state.pop("harvestImageMessage"))
 
     role = current_user["role"]
     user_id = int(current_user["userID"])
 
     # Farmers see only their own lots.
     if role == "farmer":
-        lots = selectData("""SELECT hl.lotID, f.farmName,  c.cropName, hl.harvestDate
+        lots = selectData("""SELECT hl.lotID, f.farmName,  c.cropName, hl.harvestDate,
+                (SELECT COUNT(*) FROM HarvestLotImages hi WHERE hi.lotID = hl.lotID) AS photoCount,
+                (SELECT hi.imageName FROM HarvestLotImages hi WHERE hi.lotID = hl.lotID
+                 ORDER BY hi.imageNumber LIMIT 1) AS coverImage
             FROM HarvestLots hl, CropCycle cc, Farms f, Crops c, OwnedBy o
             WHERE hl.cycleID = cc.cycleID AND cc.farmID = f.farmID AND cc.cropID = c.cropID AND f.farmID = o.farmID AND o.userID = %s
             ORDER BY hl.lotID DESC""",(user_id,))
 
     # Market users and administrators can view all lots.
     else:
-        lots = selectData( """ SELECT hl.lotID,  f.farmName, c.cropName,  hl.harvestDate
+        lots = selectData( """ SELECT hl.lotID,  f.farmName, c.cropName,  hl.harvestDate,
+                (SELECT COUNT(*) FROM HarvestLotImages hi WHERE hi.lotID = hl.lotID) AS photoCount,
+                (SELECT hi.imageName FROM HarvestLotImages hi WHERE hi.lotID = hl.lotID
+                 ORDER BY hi.imageNumber LIMIT 1) AS coverImage
             FROM HarvestLots hl,  CropCycle cc, Farms f,Crops c
             WHERE hl.cycleID = cc.cycleID AND cc.farmID = f.farmID AND cc.cropID = c.cropID
             ORDER BY  hl.lotID DESC""")
@@ -2069,16 +2185,14 @@ def showImages(current_user):
         st.info("No harvest lots are available.")
         return
 
-    options = makeOptions(
-        lots,
-        "lotID",
-        [
-            "lotID",
-            "farmName",
-            "cropName",
-            "harvestDate"
-        ]
-    )
+    options = {}
+    for row in lots.itertuples(index=False):
+        harvested = pd.to_datetime(row.harvestDate, errors="coerce")
+        harvestedText = "" if pd.isna(harvested) else f" · harvested {harvested.day} {harvested.strftime('%b %Y')}"
+        options[f"{row.cropName} · Lot #{row.lotID} · {row.farmName}{harvestedText}"] = row.lotID
+
+    labelByLot = {lotID: label for label, lotID in options.items()}
+    showLotGallery(lots, labelByLot)
 
     selected_label = st.selectbox(
         "Select a harvest lot",
@@ -2088,59 +2202,118 @@ def showImages(current_user):
 
     selected_lot_id = options[selected_label]
 
-    # Only farmers can upload harvest images.
-    if role == "farmer":
-        with st.form("upload_image_form"):
-            uploaded_file = st.file_uploader(
-                "Upload JPG or PNG image",
-                type=["jpg", "jpeg", "png"]
-            )
-
-            submitted = st.form_submit_button(
-                "Upload image"
-            )
-
-        if submitted:
-            if uploaded_file is None:
-                st.warning("Choose an image first.")
-
-            else:
-                uploaded, message = addHarvestImage(
-                    selected_lot_id,
-                    uploaded_file,
-                    user_id
-                )
-
-                if uploaded:
-                    st.session_state.harvestImageMessage = message
-                    st.rerun()
-                else:
-                    st.warning(message)
-
     images = selectData("""SELECT hi.imageNumber, hi.imageName, f.farmName,  c.cropName
         FROM HarvestLotImages hi,  HarvestLots hl,CropCycle cc, Farms f, Crops c
         WHERE hi.lotID = %s AND hi.lotID = hl.lotID AND hl.cycleID = cc.cycleID AND cc.farmID = f.farmID AND cc.cropID = c.cropID
         ORDER BY hi.imageNumber""", (selected_lot_id,))
 
-    if images.empty:
-        st.info("No images uploaded for this lot.")
-        return
+    lot = lots[lots["lotID"] == selected_lot_id].iloc[0]
+    photoCount = len(images)
+    harvested = pd.to_datetime(lot["harvestDate"], errors="coerce")
+    harvestedText = "—" if pd.isna(harvested) else f"{harvested.day} {harvested.strftime('%b %Y')}"
+    if photoCount == 0:
+        countBadge = '<span class="hl-gallery-count hl-gallery-count-none">No photos</span>'
+    else:
+        countBadge = f'<span class="hl-gallery-count">{photoCount} photo{"" if photoCount == 1 else "s"}</span>'
 
-    for _, image_row in images.iterrows():
-        image_number = image_row["imageNumber"]
-        image_name = str(image_row["imageName"])
-
-        caption = (
-            f"Lot {selected_lot_id} - "
-            f"{image_row['cropName']} - "
-            f"{image_row['farmName']}"
+    with st.container(key="image_lot_panel"):
+        st.markdown(
+            f'<div class="hl-lotpanel-head"><div><span class="hl-lotpanel-eyebrow">Selected lot</span>'
+            f'<h3>{escape(str(lot["cropName"]))}</h3>'
+            f'<span class="hl-gallery-meta">Lot #{selected_lot_id} · {escape(str(lot["farmName"]))} · '
+            f'Harvested {harvestedText}</span></div>{countBadge}</div>',
+            unsafe_allow_html=True
         )
 
-        showHarvestImageFile(
-            image_name,
-            caption=caption,
-            width=350
-        )
+        if images.empty:
+            hint = " Upload the first one below." if role == "farmer" else ""
+            st.markdown(
+                '<div class="hl-gallery-empty"><span class="material-symbols-rounded" aria-hidden="true">'
+                f'add_a_photo</span>No photos for this lot yet.{hint}</div>',
+                unsafe_allow_html=True
+            )
+        else:
+            photos = []
+            for position, (_, image_row) in enumerate(images.iterrows(), start=1):
+                imageData = lotPhotoData(str(image_row["imageName"]))
+                if imageData:
+                    picture = (
+                        f'<img src="data:image/jpeg;base64,{imageData}" '
+                        f'alt="{escape(str(lot["cropName"]))}, photo {position}">'
+                    )
+                else:
+                    picture = '<span class="hl-photo-missing">Image unavailable</span>'
+                photos.append(
+                    f'<figure class="hl-photo"><div class="hl-photo-frame">{picture}</div>'
+                    f'<figcaption>Photo {position}</figcaption></figure>'
+                )
+            st.markdown(f'<div class="hl-photo-grid">{"".join(photos)}</div>', unsafe_allow_html=True)
+
+        uploadedMessage = st.session_state.pop("harvestImageMessage", None)
+        if uploadedMessage:
+            st.markdown(
+                '<div class="hl-gallery-empty hl-upload-done"><span class="material-symbols-rounded" '
+                f'aria-hidden="true">check_circle</span>{escape(uploadedMessage)}</div>',
+                unsafe_allow_html=True
+            )
+
+        # Only farmers can upload harvest images.
+        if role == "farmer":
+            uploadRound = st.session_state.get("lot_photo_upload_round", 0)
+            st.markdown(
+                '<div class="hl-upload-head"><strong>Add a photo</strong>'
+                '<span>JPG or PNG, up to 5 MB</span></div>',
+                unsafe_allow_html=True
+            )
+            uploaded_file = st.file_uploader(
+                "Add a photo",
+                type=["jpg", "jpeg", "png"],
+                max_upload_size=5,
+                key=f"lot_photo_upload_{selected_lot_id}_{uploadRound}",
+                label_visibility="collapsed"
+            )
+
+            if uploaded_file is not None:
+                previewCol, actionCol = st.columns([0.3, 0.7], vertical_alignment="center")
+                with previewCol:
+                    try:
+                        from PIL import ImageOps
+                        uploaded_file.seek(0)
+                        with Image.open(uploaded_file) as source:
+                            preview = ImageOps.exif_transpose(source).convert("RGB")
+                            preview.thumbnail((480, 480))
+                        st.image(preview, width="stretch")
+                    except Exception:
+                        st.caption("This file can't be previewed.")
+                    finally:
+                        uploaded_file.seek(0)
+
+                with actionCol:
+                    size = uploaded_file.size
+                    sizeText = f"{size / 1024 / 1024:.1f} MB" if size >= 1024 * 1024 else f"{max(1, round(size / 1024))} KB"
+                    st.markdown(
+                        f'<div class="hl-upload-ready"><strong>{escape(uploaded_file.name)}</strong>'
+                        f'<span>{sizeText} · will be added to Lot #{selected_lot_id}</span></div>',
+                        unsafe_allow_html=True
+                    )
+                    if st.button(
+                        "Upload photo",
+                        type="primary",
+                        icon=":material/cloud_upload:",
+                        key=f"lot_photo_submit_{selected_lot_id}"
+                    ):
+                        uploaded, message = addHarvestImage(
+                            selected_lot_id,
+                            uploaded_file,
+                            user_id
+                        )
+
+                        if uploaded:
+                            st.session_state.harvestImageMessage = message
+                            st.session_state["lot_photo_upload_round"] = uploadRound + 1
+                            st.rerun()
+                        else:
+                            st.warning(message)
 
 
 def addHarvestImage(lotID, uploadedFile, userID):
