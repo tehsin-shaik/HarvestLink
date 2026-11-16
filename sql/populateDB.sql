@@ -1,6 +1,6 @@
 USE DBProjGroup3;
 
-INSERT IGNORE INTO Units (unitName, isActive) VALUES
+INSERT INTO Units (unitName, isActive) VALUES
 ('g', 1),
 ('kg', 1),
 ('ton', 1),
