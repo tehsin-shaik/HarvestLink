@@ -2,8 +2,7 @@ CREATE SCHEMA IF NOT EXISTS DBProjGroup3;
 CREATE DATABASE IF NOT EXISTS DBProjGroup3;
 USE DBProjGroup3;
 
--- Admins can manage which units are available in the app.
-CREATE TABLE IF NOT EXISTS Units (
+CREATE TABLE Units (
     unitName VARCHAR(20) PRIMARY KEY,
     isActive BOOLEAN NOT NULL DEFAULT 1,
     CHECK (isActive IN (0, 1))
