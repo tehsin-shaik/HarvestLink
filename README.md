@@ -32,6 +32,99 @@ The interface is styled as a green farm marketplace, and **FittonAI**, a LangCha
 
 ---
 
+## Getting Started
+
+### Prerequisites
+
+- Python 3.11 or newer recommended.
+- A running MySQL server with a database account permitted to create the initial schema and tables.
+- MySQL Workbench or the MySQL command-line client for importing SQL.
+- A Gemini API key and an available model name if using FittonAI. Core application pages do not require an API key.
+
+### 1. Create the Database
+
+Open the cloned or downloaded repository folder containing this README, `code/`, and `sql/`. Run repository-root commands from that folder.
+
+From the repository root, open MySQL Workbench and execute these scripts **in order**:
+
+1. `sql/DBProjGroup3.sql`
+2. `sql/populateDB.sql`
+
+Alternatively, start the MySQL client from the repository root:
+
+```powershell
+mysql -u YOUR_MYSQL_USER -p
+```
+
+Then run these commands inside the MySQL client:
+
+```sql
+SOURCE sql/DBProjGroup3.sql;
+SOURCE sql/populateDB.sql;
+```
+
+Both scripts select the database `DBProjGroup3`. Import them into a fresh project database: table creation and seed inserts are not designed for repeated execution against an already populated database. If upgrading an existing database, apply the new `Units` table definition and its seed statements separately; do not rerun the complete population script over existing records.
+
+### 2. Install Python Dependencies
+
+Open PowerShell in the repository root:
+
+```powershell
+cd code
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Install the current requirements even if you already have a virtual environment: password hashing now requires `argon2-cffi`. These commands use the environment's Python directly, so PowerShell activation is unnecessary. Create the environment on your own computer rather than copying another developer's `.venv`.
+
+On macOS/Linux, from the repository root:
+
+```bash
+cd code
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+### 3. Configure Local Settings
+
+Create `code/.env` with your own local values:
+
+```dotenv
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=YOUR_MYSQL_USER
+DB_PASSWORD=YOUR_MYSQL_PASSWORD
+DB_NAME=DBProjGroup3
+
+# Optional: needed only for FittonAI.
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY
+GEMINI_MODEL=YOUR_AVAILABLE_GEMINI_MODEL
+```
+
+Replace the database placeholders before running. If using FittonAI, replace the Gemini placeholders too; otherwise omit the two Gemini settings. The model name must be available to your API account. Keep `.env` local; it is ignored by Git. Database connection settings are cached, so restart Streamlit after changing them.
+
+### 4. Start Streamlit
+
+Run Streamlit **from the `code` directory**, so the theme in `.streamlit/config.toml` and `style.css` are loaded. On Windows:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run "application langchain edits.py"
+```
+
+On macOS/Linux:
+
+```bash
+.venv/bin/python -m streamlit run "application langchain edits.py"
+```
+
+Open the URL printed in the terminal, normally **http://localhost:8501**. Keep MySQL and the terminal running. Press **Ctrl+C** in the terminal to stop Streamlit.
+
+### 5. Sign In or Create a Demonstration Account
+
+Use the Create account tab to create a fictional farmer or market buyer account. Administrator creation is not available through public sign-up; use the seeded administrator account with the team's demonstration credentials. The seed script stores password hashes rather than plaintext passwords. New registrations and administrator-created accounts use Argon2id with random salts. Existing SHA-256 hashes are upgraded to Argon2id after a successful login; incorrect passwords do not trigger migration.
+
+After signing in, the top navigation bar shows the pages for the account's role. The account menu (your name, top right) holds the database connection test and Sign out.
+
 ## Screenshots
 
 ### Farmers
@@ -170,99 +263,6 @@ The population script supplies 4 farms, 4 markets, 5 crops, 16 crop cycles, 12 h
 
 ---
 
-## Getting Started
-
-### Prerequisites
-
-- Python 3.11 or newer recommended.
-- A running MySQL server with a database account permitted to create the initial schema and tables.
-- MySQL Workbench or the MySQL command-line client for importing SQL.
-- A Gemini API key and an available model name if using FittonAI. Core application pages do not require an API key.
-
-### 1. Create the Database
-
-Open the cloned or downloaded repository folder containing this README, `code/`, and `sql/`. Run repository-root commands from that folder.
-
-From the repository root, open MySQL Workbench and execute these scripts **in order**:
-
-1. `sql/DBProjGroup3.sql`
-2. `sql/populateDB.sql`
-
-Alternatively, start the MySQL client from the repository root:
-
-```powershell
-mysql -u YOUR_MYSQL_USER -p
-```
-
-Then run these commands inside the MySQL client:
-
-```sql
-SOURCE sql/DBProjGroup3.sql;
-SOURCE sql/populateDB.sql;
-```
-
-Both scripts select the database `DBProjGroup3`. Import them into a fresh project database: table creation and seed inserts are not designed for repeated execution against an already populated database. If upgrading an existing database, apply the new `Units` table definition and its seed statements separately; do not rerun the complete population script over existing records.
-
-### 2. Install Python Dependencies
-
-Open PowerShell in the repository root:
-
-```powershell
-cd code
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-Install the current requirements even if you already have a virtual environment: password hashing now requires `argon2-cffi`. These commands use the environment's Python directly, so PowerShell activation is unnecessary. Create the environment on your own computer rather than copying another developer's `.venv`.
-
-On macOS/Linux, from the repository root:
-
-```bash
-cd code
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-```
-
-### 3. Configure Local Settings
-
-Create `code/.env` with your own local values:
-
-```dotenv
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=YOUR_MYSQL_USER
-DB_PASSWORD=YOUR_MYSQL_PASSWORD
-DB_NAME=DBProjGroup3
-
-# Optional: needed only for FittonAI.
-GEMINI_API_KEY=YOUR_GEMINI_API_KEY
-GEMINI_MODEL=YOUR_AVAILABLE_GEMINI_MODEL
-```
-
-Replace the database placeholders before running. If using FittonAI, replace the Gemini placeholders too; otherwise omit the two Gemini settings. The model name must be available to your API account. Keep `.env` local; it is ignored by Git. Database connection settings are cached, so restart Streamlit after changing them.
-
-### 4. Start Streamlit
-
-Run Streamlit **from the `code` directory**, so the theme in `.streamlit/config.toml` and `style.css` are loaded. On Windows:
-
-```powershell
-.\.venv\Scripts\python.exe -m streamlit run "application langchain edits.py"
-```
-
-On macOS/Linux:
-
-```bash
-.venv/bin/python -m streamlit run "application langchain edits.py"
-```
-
-Open the URL printed in the terminal, normally **http://localhost:8501**. Keep MySQL and the terminal running. Press **Ctrl+C** in the terminal to stop Streamlit.
-
-### 5. Sign In or Create a Demonstration Account
-
-Use the Create account tab to create a fictional farmer or market buyer account. Administrator creation is not available through public sign-up; use the seeded administrator account with the team's demonstration credentials. The seed script stores password hashes rather than plaintext passwords. New registrations and administrator-created accounts use Argon2id with random salts. Existing SHA-256 hashes are upgraded to Argon2id after a successful login; incorrect passwords do not trigger migration.
-
-After signing in, the top navigation bar shows the pages for the account's role. The account menu (your name, top right) holds the database connection test and Sign out.
-
 ## Image Storage
 
 Uploads are saved as PNG files in `code/images/`, with filenames recorded in `HarvestLotImages`. The image resolver also supports a repository-level `images/` folder and case-insensitive filename matching.
@@ -291,37 +291,6 @@ Each generated query passes these server-side checks before it runs:
 The selected advanced-feature implementation is **secure login and activity audit**. Administrators can inspect login/logout timestamps, sensitive actions, responsible users, affected-record details, and denied-access demonstrations through the activity timeline and the **Test farm access** check. Each time a signed-in user does anything, the app re-reads their account from the database, so a role change made by an administrator applies on that user's next action: their pages, permission checks and FittonAI scope switch to the new role, and they see a short notice. If the account no longer exists, the session is signed out. Explicit logout records session duration. Automatic session expiry and browser-close logout auditing are not implemented. Passwords use salted Argon2id hashes. Login supports legacy SHA-256 verification and upgrades successful legacy logins, as well as Argon2 hashes whose parameters need rehashing.
 
 ---
-
-## Remaining Work
-
-- Test FittonAI's role scoping, refusals, and read-only execution, and document the results.
-- Show individual reasons for failed multi-image uploads.
-- Complete end-to-end, boundary, repeated-request, rollback, and concurrency tests.
-- Verify the earlier buyer request issue through a live harvest-to-request-to-allocation workflow.
-- Document test cases with expected and actual results, including at least 10 FittonAI questions with ambiguous and unanswerable examples.
-- Verify diagrams against the latest schema and retain the Draw.io ER source.
-- Complete and confirm team contribution records, including Ayesha's responsibilities.
-- Produce the technical PDF and poster PDF, rehearse the 15-minute presentation, and assemble the final ZIP.
-
-Only one advanced feature is required by the proposal. Analytics, smart demand matching, forecasting, and loss/surplus management are optional alternatives to the implemented login/audit feature.
-
-## Verification Checklist
-
-Record actual results rather than treating this checklist as completed test evidence.
-
-- [ ] Create a harvest and verify available, reserved, and on-hand quantities.
-- [ ] Create a buyer request, allocate stock, cancel a reservation, and verify request/status history.
-- [ ] Confirm a partial delivery and verify stock changes and discrepancy records.
-- [ ] Reject excess allocations, invalid dates/units, duplicate records, and unauthorized actions.
-- [ ] Test simultaneous allocations and repeated delivery confirmations.
-- [ ] Verify the available-on filter excludes lots outside their harvest/sell-by dates.
-- [ ] Add, deactivate, and reactivate units as admin; verify form options, history, permissions, and audit entries.
-- [ ] Verify Argon2id login, wrong-password rejection, random salts, and successful migration of legacy accounts.
-- [ ] Upload JPG/PNG images, reject duplicates/invalid files, and retrieve images after restarting.
-- [ ] Confirm friendly handling of missing/corrupt images and database failures.
-- [ ] Check admin audit entries for login, logout, sensitive actions, and denied access.
-- [ ] Change a signed-in user's role as admin and verify their pages and permissions update on their next action.
-- [ ] Test at least 10 FittonAI questions against SQL results.
 
 ## Troubleshooting
 
