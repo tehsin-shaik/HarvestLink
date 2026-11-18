@@ -80,7 +80,7 @@ Every page adapts to narrow screens: the navigation wraps, cards stack, and wide
 | Market operations | Shop produce by crop, farm, location, unit, available-on date, and minimum quantity; create, edit, and cancel requests; reserve produce through farmer allocations; release reservations; confirm deliveries and discrepancies |
 | History | Completed crop-cycle history, inactive harvest-lot history, past allocations, and delivery receipts |
 | Images | JPG/PNG upload controls; images linked to lots; persistent local files; duplicate pixel detection within a lot; safe image display |
-| Accounts and audit | Registration, salted Argon2id password hashing, legacy-hash migration on login, explicit logout, session state, ownership checks, sensitive-operation logging, and an administrator activity timeline |
+| Accounts and audit | Registration, salted Argon2id password hashing, legacy-hash migration on login, explicit logout, session state, ownership checks, sensitive-operation logging, and an administrator activity timeline. The signed-in account is re-read on every action, so role changes apply without signing in again |
 | Administration | Manage users and roles; add and edit crops and markets; add, deactivate, and reactivate units; inspect read-only operational records and responsible users |
 | FittonAI | Natural-language questions through LangChain and Gemini, role-scoped read-only SQL, supporting records and SQL, and answer summaries |
 | Interface | Green marketplace theme, top navigation, cards and lists with status pills, pop-up forms, List/Table switches, and phone layouts |
@@ -121,7 +121,7 @@ flowchart TD
     DB --> R[Harvest-lot image references]
 ```
 
-The current interface, database helpers, business logic, and FittonAI are in `code/application langchain edits.py`, styled by `code/style.css` and `code/.streamlit/config.toml`. `code/application.py` is the earlier version, before the LangChain integration and the interface redesign.
+The current interface, database helpers, business logic, and FittonAI are in `code/application langchain edits.py`, styled by `code/style.css` and `code/.streamlit/config.toml`.
 
 ## Technology Stack
 
@@ -145,7 +145,6 @@ HarvestLink/
 |   `-- screenshots/               # README screenshots
 |-- code/
 |   |-- application langchain edits.py   # Current application
-|   |-- application.py             # Earlier version, kept for reference
 |   |-- style.css                  # Interface styles
 |   |-- .streamlit/
 |   |   `-- config.toml            # Theme colours and fonts
@@ -289,7 +288,7 @@ Each generated query passes these server-side checks before it runs:
 - Results are limited to 200 records, and the query runs in a `READ ONLY` transaction that is rolled back afterwards.
 - Explicit questions about other people's private records are refused before any SQL is generated. Refusals and blocked queries are recorded in the activity log.
 
-The selected advanced-feature implementation is **secure login and activity audit**. Administrators can inspect login/logout timestamps, sensitive actions, responsible users, affected-record details, and denied-access demonstrations through the activity timeline and the **Test farm access** check. Explicit logout records session duration. Automatic session expiry and browser-close logout auditing are not implemented. Passwords use salted Argon2id hashes. Login supports legacy SHA-256 verification and upgrades successful legacy logins, as well as Argon2 hashes whose parameters need rehashing.
+The selected advanced-feature implementation is **secure login and activity audit**. Administrators can inspect login/logout timestamps, sensitive actions, responsible users, affected-record details, and denied-access demonstrations through the activity timeline and the **Test farm access** check. Each time a signed-in user does anything, the app re-reads their account from the database, so a role change made by an administrator applies on that user's next action: their pages, permission checks and FittonAI scope switch to the new role, and they see a short notice. If the account no longer exists, the session is signed out. Explicit logout records session duration. Automatic session expiry and browser-close logout auditing are not implemented. Passwords use salted Argon2id hashes. Login supports legacy SHA-256 verification and upgrades successful legacy logins, as well as Argon2 hashes whose parameters need rehashing.
 
 ---
 
@@ -321,6 +320,7 @@ Record actual results rather than treating this checklist as completed test evid
 - [ ] Upload JPG/PNG images, reject duplicates/invalid files, and retrieve images after restarting.
 - [ ] Confirm friendly handling of missing/corrupt images and database failures.
 - [ ] Check admin audit entries for login, logout, sensitive actions, and denied access.
+- [ ] Change a signed-in user's role as admin and verify their pages and permissions update on their next action.
 - [ ] Test at least 10 FittonAI questions against SQL results.
 
 ## Troubleshooting

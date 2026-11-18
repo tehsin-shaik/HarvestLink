@@ -539,6 +539,37 @@ def createFarmForUser(userID, farmName, farmLocation):
             connection.close()
 
 
+def refreshSignedInUser(currentUser):
+    # Re-read the account on every run, so a role change made by an
+    # administrator applies on the user's next action, not their next login.
+    connection = None
+    cursor = None
+    try:
+        connection = getConnection()
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT userID, fname, lname, role, email FROM Users WHERE userID = %s",
+            (int(currentUser["userID"]),)
+        )
+        user = cursor.fetchone()
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+    if user is None:
+        return None
+    return {
+        "userID": user[0],
+        "fname": user[1],
+        "lname": user[2],
+        "fullname": f"{user[1]} {user[2]}",
+        "role": str(user[3]).strip().lower(),
+        "email": user[4]
+    }
+
+
 def signInUser(email, password):
     email = email.strip().lower()
 
@@ -670,6 +701,8 @@ def showAuthentication():
 
     if st.session_state.pop("signedOutMessage", None):
         st.toast("You have signed out. See you soon!", icon="👋")
+    if st.session_state.pop("accountRemovedMessage", None):
+        st.warning("Your account is no longer available, so you have been signed out.")
 
     left, right = st.columns([1.15, 1], gap="large", vertical_alignment="center")
 
@@ -7884,7 +7917,30 @@ def main():
         showAuthentication()
         return
 
-    currentUser = st.session_state.currentUser
+    try:
+        currentUser = refreshSignedInUser(st.session_state.currentUser)
+    except Exception as error:
+        print("Session refresh error:", error)
+        st.error("Your account could not be checked right now. Please try again.")
+        return
+
+    if currentUser is None:
+        # The account no longer exists, so end this session.
+        for key in ("currentUser", "sessionStartedAt", "selectedProduceLot", "fitton_chat", "fitton_pending"):
+            st.session_state.pop(key, None)
+        st.session_state.accountRemovedMessage = True
+        st.rerun()
+
+    if currentUser["role"] != st.session_state.currentUser["role"]:
+        # Drop state that belonged to the old role's pages.
+        for key in ("selectedProduceLot", "fitton_chat", "fitton_pending"):
+            st.session_state.pop(key, None)
+        newRole = {"farmer": "Farmer", "user": "Market buyer", "admin": "Administrator"}.get(
+            currentUser["role"], currentUser["role"]
+        )
+        st.toast(f"Your role was changed to {newRole}, so your pages have been updated.")
+
+    st.session_state.currentUser = currentUser
     role = currentUser["role"]
 
     # Pages allowed for each role
