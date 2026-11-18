@@ -270,6 +270,7 @@ Uploads are saved as PNG files in `code/images/`, with filenames recorded in `Ha
 
 - Keep image files alongside the SQL records when sharing or submitting the project; the database does not contain the image binaries.
 - Uploads have a 5 MB input limit and a 20-megapixel dimension check.
+- Uploads must decode as JPEG or PNG. The file name is not trusted, so another format renamed to `.png` or `.jpg` (for example GIF, WebP or BMP) is rejected.
 - Duplicate detection compares normalized pixel fingerprints within the same harvest lot. Resized or recompressed versions may have different fingerprints.
 - Missing or corrupt images display friendly messages; diagnostic details remain in the terminal.
 - Successful upload messages survive Streamlit reruns.
@@ -295,7 +296,7 @@ The selected advanced-feature implementation is **secure login and activity audi
 ## Remaining Work
 
 - Test FittonAI's role scoping, refusals, and read-only execution, and document the results.
-- Validate decoded image formats as JPEG/PNG, and show individual reasons for failed multi-image uploads.
+- Show individual reasons for failed multi-image uploads.
 - Complete end-to-end, boundary, repeated-request, rollback, and concurrency tests.
 - Verify the earlier buyer request issue through a live harvest-to-request-to-allocation workflow.
 - Document test cases with expected and actual results, including at least 10 FittonAI questions with ambiguous and unanswerable examples.

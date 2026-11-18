@@ -2142,6 +2142,21 @@ def showHarvestImageFile(imageName, caption=None, compact=False, **imageOptions)
         return False
 
 
+UPLOAD_IMAGE_FORMATS = {"JPEG", "MPO", "PNG"}
+
+
+def openUploadedImage(uploadedFile):
+    # Check the decoded format, not the file name: only the JPEG and PNG
+    # decoders are tried, so a GIF or WebP renamed to .png is rejected.
+    # MPO is the JPEG variant some phone cameras save.
+    uploadedFile.seek(0)
+    source = Image.open(uploadedFile, formats=("JPEG", "PNG"))
+    if source.format not in UPLOAD_IMAGE_FORMATS:
+        source.close()
+        raise UnidentifiedImageError(f"Unsupported image format: {source.format}")
+    return source
+
+
 def imagePixelFingerprint(image):
     """Compare image appearance independent of JPG/PNG encoding or metadata."""
     from PIL import ImageOps
@@ -2394,13 +2409,12 @@ def showImages(current_user):
                 with previewCol:
                     try:
                         from PIL import ImageOps
-                        uploaded_file.seek(0)
-                        with Image.open(uploaded_file) as source:
+                        with openUploadedImage(uploaded_file) as source:
                             preview = ImageOps.exif_transpose(source).convert("RGB")
                             preview.thumbnail((480, 480))
                         st.image(preview, width="stretch")
                     except Exception:
-                        st.caption("This file can't be previewed.")
+                        st.caption("This file isn't a valid JPG or PNG image.")
                     finally:
                         uploaded_file.seek(0)
 
@@ -2448,8 +2462,7 @@ def addHarvestImage(lotID, uploadedFile, userID):
         # different file encodings won't create false non-duplicates.
         try:
             from PIL import ImageOps
-            uploadedFile.seek(0)
-            with Image.open(uploadedFile) as source:
+            with openUploadedImage(uploadedFile) as source:
                 image = ImageOps.exif_transpose(source).convert("RGB")
                 image.load()
             fingerprint = imagePixelFingerprint(image)
