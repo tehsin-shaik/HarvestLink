@@ -312,11 +312,9 @@ The selected advanced-feature implementation is **secure login and activity audi
 
 | Team member | Contributions to date |
 |:---|:---|
-| Tehsin Shaik | Database Design and Population; Database Programming; Python GUI; Advanced Feature |
-| Raghad Elajab | Database Design and Population; Database Programming; Advanced Feature |
-| Ayesha Almheiri | To be documented |
-
-All team members must contribute to database design and implementation.
+| Tehsin Shaik | Database Design and Population; Database Programming; Python GUI; Advanced Feature; Testing |
+| Raghad Elajab | Database Design and Population; Database Programming; Advanced Feature; Testing |
+| Ayesha Almheiri | Project Documentation, Review and Coordination |
 
 ## License
 
