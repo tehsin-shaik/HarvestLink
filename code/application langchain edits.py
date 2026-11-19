@@ -1511,8 +1511,12 @@ def showDashboard(current_user):
         st.info("No harvested lots are available yet.")
 
     else:
+        # Lots without a sell-by date hold NaN, so compare as datetimes.
+        groupable = available.assign(
+            sellByDate=pd.to_datetime(available["sellByDate"], errors="coerce")
+        )
         cropTotals = (
-            available.groupby(["cropName", "unit"])
+            groupable.groupby(["cropName", "unit"])
             .agg(
                 lots=("lotID", "count"),
                 stock=("stockOnHand", "sum"),
@@ -1523,6 +1527,9 @@ def showDashboard(current_user):
             .reset_index()
             .sort_values("availableNow", ascending=False)
         )
+        cropTotals["nextSellBy"] = [
+            None if pd.isna(day) else day.date() for day in cropTotals["nextSellBy"]
+        ]
 
         titleCol, viewCol = st.columns([0.7, 0.3], vertical_alignment="bottom")
         with titleCol:
